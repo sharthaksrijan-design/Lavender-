@@ -65,6 +65,7 @@ class EpisodicMemory:
         personality: str,
         tags: list[str] = None,
         session_id: str = None,
+        importance: float = 0.5,
     ):
         """
         Store a session summary as an episodic memory.
@@ -74,6 +75,7 @@ class EpisodicMemory:
             personality: Which personality was active during the session.
             tags:        Topic tags extracted from the session (e.g. ["project-nexus", "code"]).
             session_id:  Unique session identifier. Auto-generated if not provided.
+            importance:  Scale of 0.0 to 1.0 (decided by LLM summarizer). High importance decays slower.
         """
         session_id = session_id or f"ep_{int(time.time())}"
         tags = tags or []
@@ -83,7 +85,8 @@ class EpisodicMemory:
             "tags":         json.dumps(tags),
             "timestamp":    datetime.now().isoformat(),
             "timestamp_ts": int(time.time()),
-            "relevance":    1.0,    # Decays over time via decay()
+            "importance":   importance,
+            "relevance":    1.0,    # Initial relevance, decays over time via decay()
         }
 
         self._collection.add(
@@ -92,7 +95,7 @@ class EpisodicMemory:
             ids=[session_id],
         )
 
-        logger.info(f"Stored episode '{session_id}' ({len(summary)} chars)")
+        logger.info(f"Stored episode '{session_id}' (importance: {importance})")
 
     def recall(self, query: str, n_results: int = 3, min_relevance: float = 0.3) -> list[dict]:
         """
@@ -160,8 +163,13 @@ class EpisodicMemory:
         for ep_id, meta in zip(all_results["ids"], all_results["metadatas"]):
             stored_ts = meta.get("timestamp_ts", now_ts)
             age_seconds = now_ts - stored_ts
-            decay_factor = 0.5 ** (age_seconds / half_life_seconds)
-            new_relevance = round(meta.get("relevance", 1.0) * decay_factor, 4)
+
+            # High importance memories decay slower (importance 1.0 = 4x half-life)
+            importance = meta.get("importance", 0.5)
+            effective_half_life = half_life_seconds * (1.0 + (importance * 3.0))
+
+            decay_factor = 0.5 ** (age_seconds / effective_half_life)
+            new_relevance = round(decay_factor, 4)
 
             if abs(new_relevance - meta.get("relevance", 1.0)) > 0.01:
                 meta["relevance"] = new_relevance
@@ -230,7 +238,7 @@ class SemanticMemory:
 
     VALID_CATEGORIES = {
         "preference", "project", "person",
-        "routine", "decision", "system", "general"
+        "routine", "decision", "system", "task", "habit", "general"
     }
 
     def __init__(self, db_path: str):
@@ -500,9 +508,9 @@ class LavenderMemory:
 
         return "\n\n".join(parts)
 
-    def store_session(self, summary: str, personality: str, tags: list[str] = None):
+    def store_session(self, summary: str, personality: str, tags: list[str] = None, importance: float = 0.5):
         """Store an end-of-session summary in episodic memory."""
-        self.episodic.store(summary, personality, tags)
+        self.episodic.store(summary, personality, tags, importance=importance)
 
     def store_fact(self, category: str, key: str, value: str, **kwargs):
         """Store a semantic fact."""

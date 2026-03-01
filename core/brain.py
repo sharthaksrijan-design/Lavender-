@@ -30,6 +30,7 @@ from core.personality import (
 )
 from core.memory import LavenderMemory
 from core.summarizer import SessionSummarizer
+from core.state import instance as state_engine
 
 logger = logging.getLogger("lavender.brain")
 
@@ -297,8 +298,22 @@ class LavenderBrain:
     # ── CORE REASONING ────────────────────────────────────────────────────────
 
     def _get_system_prompt(self, user_text: str, extra_context: str = "") -> str:
-        """Build the full system prompt with memory injected."""
+        """Build the full system prompt with memory and world state injected."""
         system_content = self.current_personality.system_prompt
+
+        # Inject World State
+        ctx = state_engine.get_context_summary()
+        state_prompt = (
+            f"\n\nCURRENT CONTEXT:\n"
+            f"- Time: {ctx['time_of_day']}\n"
+            f"- User status: {ctx['user_state']}\n"
+            f"- System status: {ctx['system_status']}\n"
+        )
+        if ctx['is_idle']:
+            state_prompt += "- Observation: User has been idle for several minutes.\n"
+
+        system_content += state_prompt
+
         if self.memory:
             memory_context = self.memory.recall_for_query(user_text)
             if memory_context:
@@ -501,6 +516,7 @@ class LavenderBrain:
                 summary=result["summary"],
                 personality=self.current_personality.name,
                 tags=result["tags"],
+                importance=result["importance"],
             )
 
         if result["facts"]:

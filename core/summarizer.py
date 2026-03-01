@@ -47,6 +47,32 @@ PERSONALITY ACTIVE DURING SESSION: {personality}
 Write the summary paragraph now:"""
 
 
+EPISODE_IMPORTANCE_PROMPT = """Assess the long-term importance of this session summary
+on a scale of 0.0 to 1.0.
+
+Criteria for HIGH importance (0.8–1.0):
+- Major life or project decisions made
+- User shared deep personal values or core identity facts
+- Significant milestone reached
+- High-stakes information (medical, legal, financial)
+
+Criteria for MEDIUM importance (0.4–0.7):
+- Progress on ongoing projects
+- New preferences learned
+- Social interactions and context
+
+Criteria for LOW importance (0.0–0.3):
+- Routine task execution
+- Casual conversation with no lasting value
+- Pure technical debugging with no architectural decisions
+
+SUMMARY: {summary}
+
+Return ONLY a float between 0.0 and 1.0. No explanation.
+
+Return float now:"""
+
+
 FACT_EXTRACTION_PROMPT = """You are extracting structured facts from a conversation
 between a user and Lavender, their personal AI system.
 
@@ -246,6 +272,23 @@ class SessionSummarizer:
 
     # ── FULL SESSION CLOSE ────────────────────────────────────────────────────
 
+    def assess_importance(self, summary: str) -> float:
+        """
+        Uses the primary LLM to assess the long-term importance of a session summary.
+        Used to determine memory decay rate.
+        """
+        if not summary or len(summary) < 20:
+            return 0.3
+
+        prompt = EPISODE_IMPORTANCE_PROMPT.format(summary=summary)
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            importance = float(response.content.strip())
+            return max(0.0, min(1.0, importance))
+        except Exception as e:
+            logger.warning(f"Importance assessment failed: {e}. Defaulting to 0.5.")
+            return 0.5
+
     def process_session(
         self,
         session_history: list[dict],
@@ -259,6 +302,7 @@ class SessionSummarizer:
           "summary": str,       # The episodic summary paragraph
           "facts": list[dict],  # Extracted semantic facts
           "tags": list[str],    # Topic tags
+          "importance": float,  # Long-term importance score
         }
 
         The caller (brain.py) is responsible for writing these to LavenderMemory.
@@ -271,11 +315,13 @@ class SessionSummarizer:
         summary = self.write_episode(session_history, personality)
         facts   = self.extract_facts(session_history)
         tags    = self.extract_tags(session_history)
+        importance = self.assess_importance(summary) if summary else 0.5
 
         return {
-            "summary": summary,
-            "facts":   facts,
-            "tags":    tags,
+            "summary":    summary,
+            "facts":      facts,
+            "tags":       tags,
+            "importance": importance,
         }
 
 

@@ -106,8 +106,8 @@ echo "    ✓ Service enabled (will start on boot)."
 echo ""
 echo "[6/6] Setting up log rotation..."
 
-cat > /etc/logrotate.d/lavender << 'LOGROTATE'
-$(pwd)/logs/*.log {
+cat > /etc/logrotate.d/lavender << LOGROTATE
+/opt/lavender/logs/*.log {
     daily
     rotate 14
     compress

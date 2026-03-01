@@ -50,6 +50,7 @@ from core.health import build_standard_monitors
 from core.intent_fusion import IntentFusion, FusedIntent, Modality, SurfaceControl
 from tools.tool_registry import build_toolkit, describe_toolkit
 from core.proactive import ProactiveEngine, TriggerPriority
+from core.state import instance as state_engine, UserState, SystemStatus
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 CONFIG_PATH = ROOT / "config" / "lavender.yaml"
@@ -275,6 +276,7 @@ class Lavender:
         personality_before = self.brain.personality_name
 
         print_you(text)
+        state_engine.update_user_activity()
         print_status(self.brain.personality_name, "thinking...")
 
         if self.hologram:
@@ -292,9 +294,12 @@ class Lavender:
 
         print_lavender(self.brain.personality_name, response)
 
+        # Optimize: Trigger hologram and voice output asynchronously where possible
+        # so processing can prepare for next input
         if self.hologram:
             self.hologram.on_speaking(response)
 
+        # TTS playback is already interruptible and blocks only for playback duration
         self.voice_out.speak(response)
 
         if self.hologram:

@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from datetime import datetime, timedelta
 from enum import Enum
+from core.state import instance as state_engine, UserState
 
 logger = logging.getLogger("lavender.proactive")
 
@@ -204,6 +205,11 @@ class ProactiveEngine:
 
     def _run(self):
         while not self._stop.wait(10.0):
+            # Context Awareness: Don't speak if user is in FOCUS mode
+            if state_engine.state.user == UserState.FOCUS:
+                logger.debug("Proactive trigger skipped (User in Focus mode)")
+                continue
+
             now = time.time()
             personality = self._get_personality()
             proactivity = PERSONALITY_PROACTIVITY.get(personality, 0.3)

@@ -263,31 +263,25 @@ class VoiceOutput:
         if self._stop_event.is_set():
             return
 
-        # Calculate total duration
-        duration_seconds = len(audio_data) / sample_rate
-        chunk_size = int(sample_rate * 0.1)  # 100ms chunks
-        position = 0
+        try:
+            if sd:
+                # Play the entire array at once to avoid stuttering.
+                # sd.play() is non-blocking.
+                sd.play(audio_data, samplerate=sample_rate, device=self.output_device)
 
-        # Handle mono/stereo
-        channels = 1 if audio_data.ndim == 1 else audio_data.shape[1]
-
-        while position < len(audio_data) and not self._stop_event.is_set():
-            chunk = audio_data[position:position + chunk_size]
-            if len(chunk) == 0:
-                break
-
-            try:
-                if sd:
-                    sd.play(chunk, samplerate=sample_rate, device=self.output_device)
-                    sd.wait()
-                else:
-                    logger.error("Sounddevice not available for playback.")
-                    break
-            except Exception as e:
-                logger.error(f"Audio playback error: {e}")
-                break
-
-            position += chunk_size
+                # Periodically check for interruption while playing
+                duration = len(audio_data) / sample_rate
+                start_time = time.time()
+                while time.time() - start_time < duration:
+                    if self._stop_event.is_set():
+                        sd.stop()
+                        break
+                    time.sleep(0.1)
+                sd.wait() # Ensure playback is actually finished
+            else:
+                logger.error("Sounddevice not available for playback.")
+        except Exception as e:
+            logger.error(f"Audio playback error: {e}")
 
     # ── FALLBACK TTS ──────────────────────────────────────────────────────────
 

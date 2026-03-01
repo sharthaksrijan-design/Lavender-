@@ -1,6 +1,6 @@
 [Unit]
 Description=Lavender Spatial AI System
-Documentation=file://$(pwd)/README.md
+Documentation=file:///opt/lavender/README.md
 After=network-online.target ollama.service sound.target
 Wants=network-online.target
 Requires=ollama.service
