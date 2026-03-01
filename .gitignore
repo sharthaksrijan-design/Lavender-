@@ -1,0 +1,33 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Environment variables
+.env
+config/.env
+
+# Local memory and logs
+logs/*.log
+memory/chroma/
+memory/semantic.db
+config/runtime.yaml
+config/zone_calibration.yaml
+
+# OS artifacts
+.DS_Store
+Thumbs.db
