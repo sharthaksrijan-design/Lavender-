@@ -32,6 +32,7 @@ import queue
 import argparse
 import time
 import yaml
+from typing import Optional
 from pathlib import Path
 from dotenv import load_dotenv
 from rich.console import Console
@@ -270,6 +271,20 @@ class Lavender:
         )
         self.proactive.start()
 
+        # Register existing calendar events as proactive triggers
+        try:
+            from tools.calendar import _load_events
+            from datetime import datetime
+            for event in _load_events():
+                try:
+                    t = datetime.fromisoformat(event["start"])
+                    if t.date() == datetime.now().date():
+                        self.proactive.add_calendar_trigger(event["title"], t)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Could not load calendar triggers: {e}")
+
         # START TASK WORKER
         self._start_task_worker()
 
@@ -291,6 +306,21 @@ class Lavender:
 
         print_you(text)
         state_engine.update_user_activity()
+
+        # ── REFLEX CHECK ──
+        reflex_response = self.brain._reflex_match(text)
+        if reflex_response:
+            logger.info("Reflex match found. Skipping streaming loop.")
+            print_lavender(self.brain.personality_name, reflex_response)
+            if self.hologram:
+                self.hologram.on_wake()
+                self.hologram.on_speaking(reflex_response)
+            self.voice_out.speak(reflex_response)
+            if self.hologram:
+                self.hologram.on_done_speaking()
+            self.brain._store_turn(text, reflex_response)
+            return
+
         print_status(self.brain.personality_name, "thinking...")
 
         if self.hologram:
@@ -298,26 +328,82 @@ class Lavender:
             self.hologram.on_thinking()
 
         self.proactive.note_interaction()
-        response = self.brain.think(text)
 
-        # Sync personality if it switched inside think()
-        if self.brain.personality_name != personality_before:
-            self.voice_out.set_personality(self.brain.personality_name)
+        full_response = ""
+        # Use sentence streaming to reduce perceived latency
+        for chunk in self.brain.think_streaming(text):
+            if not chunk: continue
+            full_response += " " + chunk
+
+            # Sync personality if it switched (only happens on first chunk usually)
+            if self.brain.personality_name != personality_before:
+                self.voice_out.set_personality(self.brain.personality_name)
+                if self.hologram:
+                    self.hologram.set_personality(self.brain.personality_name)
+                personality_before = self.brain.personality_name
+
+            print_lavender(self.brain.personality_name, chunk)
+
             if self.hologram:
-                self.hologram.set_personality(self.brain.personality_name)
+                panel = self._response_to_panel(chunk)
+                if panel:
+                    self.hologram.show_panel(**panel)
+                else:
+                    self.hologram.on_speaking(chunk)
 
-        print_lavender(self.brain.personality_name, response)
-
-        # Optimize: Trigger hologram and voice output asynchronously where possible
-        # so processing can prepare for next input
-        if self.hologram:
-            self.hologram.on_speaking(response)
-
-        # TTS playback is already interruptible and blocks only for playback duration
-        self.voice_out.speak(response)
+            self.voice_out.speak(chunk)
 
         if self.hologram:
             self.hologram.on_done_speaking()
+
+    def _response_to_panel(self, response: str) -> Optional[dict]:
+        """
+        Convert a tool result response into a hologram panel directive.
+        Returns show_panel kwargs or None (→ use default show_response).
+        """
+        text_lower = response.lower()
+
+        # Weather response
+        if any(w in text_lower for w in ("temperature", "°c", "humidity", "forecast", "rain")):
+            return {
+                "panel_id":   "weather",
+                "content":    response,
+                "content_type": "info",
+                "title":      "Weather",
+                "persist":    False,
+            }
+
+        # Search results
+        if any(w in text_lower for w in ("according to", "search results", "found:")):
+            return {
+                "panel_id":   "search",
+                "content":    response,
+                "content_type": "list",
+                "title":      "Search",
+                "persist":    False,
+            }
+
+        # Code output
+        if "```" in response or any(w in text_lower for w in ("output:", "result:", "executed")):
+            return {
+                "panel_id":   "code",
+                "content":    response,
+                "content_type": "code",
+                "title":      "Code",
+                "persist":    False,
+            }
+
+        # Calendar listing
+        if any(w in text_lower for w in ("events today", "events tomorrow", "no events", " — ")):
+            return {
+                "panel_id":   "calendar",
+                "content":    response,
+                "content_type": "list",
+                "title":      "Calendar",
+                "persist":    False,
+            }
+
+        return None
 
     def _handle_surface(self, control: SurfaceControl):
         if control == SurfaceControl.EMERGENCY_MUTE:

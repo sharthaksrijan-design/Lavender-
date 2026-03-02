@@ -306,6 +306,53 @@ class LavenderBrain:
 
     # ── CORE REASONING ────────────────────────────────────────────────────────
 
+    def think_streaming(self, text: str):
+        """
+        Generator that yields sentence-complete chunks as they're ready.
+        Bypasses reflex check as caller is expected to handle it if needed.
+        """
+        text = text.strip()
+        if not text:
+            return
+
+        intent_result = self.route(text)
+        intent = intent_result.get("intent", Intent.CONVERSATIONAL)
+
+        # Tool intents are atomic, not streamed
+        if intent in TOOL_INTENTS and bool(self._tools):
+            yield self._call_agent(text)
+            return
+
+        # Conversational streaming
+        system_content = self._get_system_prompt(text)
+        messages = [SystemMessage(content=system_content)]
+        messages += self._build_message_history()
+        messages.append(HumanMessage(content=text))
+
+        full_response = ""
+        sentence_buf = ""
+
+        try:
+            # We assume self.llm is a ChatOllama which supports stream()
+            for chunk in self.llm.stream(messages):
+                content = chunk.content
+                full_response += content
+                sentence_buf += content
+
+                # Simple sentence boundary detection
+                if any(sentence_buf.rstrip().endswith(p) for p in (".", "!", "?")):
+                    yield sentence_buf.strip()
+                    sentence_buf = ""
+        except Exception as e:
+            logger.error(f"LLM streaming failed: {e}")
+            yield "I ran into an issue processing that. Try again."
+            return
+
+        if sentence_buf.strip():
+            yield sentence_buf.strip()
+
+        self._store_turn(text, full_response)
+
     def _get_system_prompt(self, user_text: str, extra_context: str = "") -> str:
         """Build the full system prompt with memory and world state injected."""
         system_content = self.current_personality.system_prompt
@@ -443,14 +490,14 @@ class LavenderBrain:
         if not text:
             return ""
 
-        logger.info(f"[{self.current_personality.display_name}] Thinking: '{text}'")
-
         # ── STEP 0: REFLEX ──
         reflex_response = self._reflex_match(text)
         if reflex_response:
             logger.info("Reflex match found. Skipping LLM.")
             self._store_turn(text, reflex_response)
             return reflex_response
+
+        logger.info(f"[{self.current_personality.display_name}] Thinking: '{text}'")
 
         # ── STEP 1: ROUTE ─────────────────────────────────────────────────────
         intent_result = self.route(text)

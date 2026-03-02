@@ -55,7 +55,9 @@ def safe_tool(func):
         return f"Error: Tool {tool_name} failed after {max_retries+1} attempts. Last error: {last_error}"
 
     # Preserve metadata for LangGraph
-    wrapper.__name__ = func.__name__
+    name = func.name if hasattr(func, 'name') else func.__name__
+    wrapper.__name__ = name
+    wrapper.name = name # Ensure it has .name for describe_toolkit
     wrapper.__doc__ = func.__doc__
     if hasattr(func, 'args_schema'):
         wrapper.args_schema = func.args_schema
@@ -249,6 +251,16 @@ def build_toolkit(
 
         except ImportError as e:
             logger.warning(f"Web tools unavailable: {e}")
+
+    # ── CALENDAR TOOLS ────────────────────────────────────────────────────────
+    try:
+        from tools.calendar import make_calendar_tools
+        calendar_tools = make_calendar_tools()
+        # Wrap each tool with safety decorator
+        tools.extend([safe_tool(t) for t in calendar_tools])
+        logger.info("Calendar tools registered.")
+    except ImportError:
+        logger.warning("Calendar tools unavailable — run: pip install icalendar dateparser")
 
     # ── MEMORY TOOLS ─────────────────────────────────────────────────────────
     # These are registered here but connected to LavenderMemory in brain.py

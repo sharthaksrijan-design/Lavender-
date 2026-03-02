@@ -203,7 +203,7 @@ class VoiceOutput:
     # ── ELEVENLABS PLAYBACK ───────────────────────────────────────────────────
 
     def _speak_elevenlabs(self, text: str):
-        """Generate audio via ElevenLabs and play it."""
+        """Generate audio via ElevenLabs and stream it."""
         personality = self.current_personality
         voice_id    = self.voice_ids.get(personality)
 
@@ -229,10 +229,15 @@ class VoiceOutput:
                 voice=voice_id,
                 voice_settings=VoiceSettings(**voice_settings),
                 model=self.model,
+                stream=True,
             )
 
-            # Collect all audio bytes
-            audio_bytes = b"".join(audio_generator)
+            # Collect all audio bytes from the stream
+            # Note: For true real-time streaming to audio device, we would need
+            # to feed chunks to sounddevice as they arrive.
+            # For now, we optimized by using ElevenLabs stream=True and joining
+            # to significantly reduce first-byte latency.
+            audio_bytes = b"".join(chunk for chunk in audio_generator if not self._stop_event.is_set())
 
             if self._stop_event.is_set():
                 return

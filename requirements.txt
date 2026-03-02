@@ -24,3 +24,5 @@ fastapi
 uvicorn[standard]
 mss
 Pillow
+icalendar
+dateparser
