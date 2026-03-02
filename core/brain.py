@@ -14,6 +14,7 @@ import json
 import random
 import time
 import logging
+import threading
 from typing import Optional
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
@@ -32,7 +33,8 @@ from core.memory import LavenderMemory
 from core.summarizer import SessionSummarizer
 from core.state import instance as state_engine
 from core.planner import instance as planner_engine
-from core.task_state import instance as task_engine, TaskStatus
+from core.task_state import instance as task_engine, TaskStatus, Step
+from core.safety import instance as safety_layer
 from tools.tool_registry import describe_toolkit
 
 logger = logging.getLogger("lavender.brain")
@@ -466,7 +468,7 @@ class LavenderBrain:
             self._agent = create_react_agent(llm_with_tools, self._tools)
             logger.info(f"ReAct agent built with {len(self._tools)} tools.")
 
-        system_content = self._get_system_prompt(user_text, extra_context=plan_context)
+        system_content = self._get_system_prompt(user_text)
 
         # Build messages for the agent
         history = self._build_message_history()
@@ -570,6 +572,17 @@ class LavenderBrain:
         if not text:
             return ""
 
+        # ── STEP -1: SAFETY/CONFIRMATION OVERRIDE ──
+        t_low = text.lower().strip()
+        if t_low in ("approve", "confirm", "yes do it", "proceed", "okay"):
+            logger.info("User confirmed pending sensitive action.")
+            safety_layer.set_user_confirmed(True)
+            # Re-run the last attempted interaction if possible, or just signal ok
+            # For simplicity, we signal the safety layer and proceed
+        else:
+            # Clear confirmation for new requests
+            safety_layer.set_user_confirmed(False)
+
         # ── STEP 0: REFLEX ──
         reflex_response = self._reflex_match(text)
         if reflex_response:
@@ -646,6 +659,10 @@ class LavenderBrain:
             return "I ran into an issue processing that. Try again."
 
         # ── STEP 5: STORE TURN ────────────────────────────────────────────────
+        # If action was blocked for confirmation, don't finalize turn yet
+        if "Action blocked: Confirmation required" in response:
+            return f"I need your permission to proceed: {response.split(':')[-1].strip()}. Say 'approve' to continue."
+
         self._store_turn(text, response)
 
         # ── STEP 6: RETURN ────────────────────────────────────────────────────

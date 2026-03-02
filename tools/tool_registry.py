@@ -283,6 +283,24 @@ def build_toolkit(
     except Exception as e:
         logger.warning(f"System tools unavailable: {e}")
 
+    # ── COMMUNICATION TOOLS ────────────────────────────────────────────────────
+    try:
+        from tools.communication import make_communication_tools
+        comm_tools = make_communication_tools()
+        tools.extend([safe_tool(t) for t in comm_tools])
+        logger.info("Communication tools registered.")
+    except Exception as e:
+        logger.warning(f"Communication tools unavailable: {e}")
+
+    # ── SOCIAL MEDIA TOOLS ────────────────────────────────────────────────────
+    try:
+        from tools.social import make_social_tools
+        social_tools = make_social_tools()
+        tools.extend([safe_tool(t) for t in social_tools])
+        logger.info("Social media tools registered.")
+    except Exception as e:
+        logger.warning(f"Social media tools unavailable: {e}")
+
     # ── VISION ────────────────────────────────────────────────────────────────
     if enable_vision:
         try:
