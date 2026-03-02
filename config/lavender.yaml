@@ -16,7 +16,9 @@ system:
   log_level: "INFO"
 
 models:
-  primary: "llama3.1:70b-instruct-q4_K_M"
+  # Primary reasoning model. Use lighter weights for low-RAM systems.
+  # 70B requires ~45GB RAM. 8B requires ~6GB RAM.
+  primary: "llama3.1:8b-instruct-q4_K_M"
   router:  "mistral:7b-instruct-q4_K_M"
   vision:  "llava:13b"
   embeddings: "nomic-embed-text"

@@ -237,6 +237,9 @@ class Lavender:
         # M5: INTENT FUSION
         self.fusion = IntentFusion()
 
+        # Update State Engine with static config
+        state_engine.state.active_personality = start_personality
+
         # M5: HEALTH MONITOR
         console.print("[dim]  health...[/dim]  ", end="\r")
         self.health = build_standard_monitors(
