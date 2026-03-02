@@ -428,8 +428,8 @@ class SemanticMemory:
         if categories:
             facts = []
             for cat in categories:
-                facts.extend(self.get_category(cat).items())
-                facts = [(cat, k, v) for k, v in self.get_category(cat).items()]
+                for k, v in self.get_category(cat).items():
+                    facts.append((cat, k, v))
         else:
             all_facts = self.get_all(min_confidence=0.6)
             facts = [(f["category"], f["key"], f["value"]) for f in all_facts]
