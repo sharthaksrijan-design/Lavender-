@@ -126,7 +126,9 @@ pip install --quiet \
     websockets \
     psutil \
     mediapipe \
-    pyrealsense2
+    pyrealsense2 \
+    icalendar \
+    dateparser
 
 echo "    ✓ Python environment ready"
 echo "    Location: $LAVENDER_ROOT/venv"

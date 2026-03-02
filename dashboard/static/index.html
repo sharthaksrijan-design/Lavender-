@@ -396,6 +396,13 @@
   .personality-badge.lilac  { background: rgba(155,89,182,0.12);   color: var(--lilac); }
   .personality-badge.system { background: rgba(255,255,255,0.06);  color: var(--dim); }
 
+  .relevance-score {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    color: var(--dimmer);
+    margin-left: auto;
+  }
+
   .episode-date {
     font-family: 'Space Mono', monospace;
     font-size: 10px;
@@ -1016,12 +1023,14 @@ function renderEpisodes(episodes) {
     }) : '—';
     const tags = (ep.tags || []).map(t => `<span class="tag">${t}</span>`).join('');
     const p = ep.personality || 'system';
+    const relevance = ep.relevance ? (ep.relevance * 100).toFixed(0) + '%' : '';
     return `
       <div class="episode-card">
         <button class="delete-btn" onclick="deleteEpisode('${ep.id}')">✕</button>
         <div class="episode-meta">
           <span class="personality-badge ${p}">${p.toUpperCase()}</span>
           <span class="episode-date">${date}</span>
+          ${relevance ? `<span class="relevance-score">Relevance: ${relevance}</span>` : ''}
         </div>
         <div class="episode-text">${escHtml(ep.text)}</div>
         ${tags ? `<div class="episode-tags">${tags}</div>` : ''}

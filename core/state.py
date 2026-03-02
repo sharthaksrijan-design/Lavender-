@@ -69,18 +69,33 @@ class StateEngine:
     def __init__(self):
         self.state = WorldState()
         self._start_time = time.time()
+        self._hour_start = time.time()
         logger.info("State engine initialized.")
 
     def update_user_activity(self):
         """Called whenever user interacts with the system."""
         now = time.time()
         self.state.last_user_interaction = now
+
+        # Reset interaction counter every hour
+        if now - self._hour_start > 3600:
+            self.state.interaction_count_1h = 0
+            self._hour_start = now
+
         self.state.interaction_count_1h += 1
 
         # If very frequent interactions, flag as STRESSED or high-focus
         # (Simple heuristic for now)
         if self.state.user != UserState.TALKING:
             self.set_user_state(UserState.TALKING)
+
+    def tick(self):
+        """Call periodically. Transitions user state based on elapsed time."""
+        idle_secs = time.time() - self.state.last_user_interaction
+        if idle_secs > 600 and self.state.user != UserState.AWAY:
+            self.set_user_state(UserState.IDLE)
+        elif idle_secs > 30 and self.state.user == UserState.TALKING:
+            self.set_user_state(UserState.IDLE)
 
     def set_user_state(self, new_state: UserState):
         if self.state.user != new_state:

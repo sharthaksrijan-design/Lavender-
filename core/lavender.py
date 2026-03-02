@@ -28,9 +28,11 @@ import sys
 import signal
 import logging
 import threading
+import queue
 import argparse
 import time
 import yaml
+from typing import Optional
 from pathlib import Path
 from dotenv import load_dotenv
 from rich.console import Console
@@ -161,6 +163,7 @@ class Lavender:
             enable_code_runner=tools_cfg.get("enable_code_runner", True),
             enable_web=tools_cfg.get("enable_web", True),
             enable_home=tools_cfg.get("enable_home", True),
+            enable_vision=tools_cfg.get("enable_vision", True),
         )
 
         # M1: BRAIN
@@ -173,6 +176,9 @@ class Lavender:
             max_working_memory=CONFIG["memory"]["max_working_memory_turns"],
             memory=self.memory,
             tools=self.toolkit,
+            top_k_memories=CONFIG["memory"].get("top_k_memories", 3),
+            intent_threshold=CONFIG["system"].get("intent_confidence_threshold", 0.75),
+            personality_overrides=CONFIG.get("personalities", {}),
         )
 
         # M3: HOLOGRAM
@@ -252,6 +258,9 @@ class Lavender:
         )
         self.health.start()
 
+        # TASK QUEUE
+        self._task_queue = queue.Queue()
+
         # PROACTIVE ENGINE
         console.print("[dim]  proactive...[/dim]", end="\r")
         self.proactive = ProactiveEngine(
@@ -261,6 +270,23 @@ class Lavender:
             session_start=time.time(),
         )
         self.proactive.start()
+
+        # Register existing calendar events as proactive triggers
+        try:
+            from tools.calendar import _load_events
+            from datetime import datetime
+            for event in _load_events():
+                try:
+                    t = datetime.fromisoformat(event["start"])
+                    if t.date() == datetime.now().date():
+                        self.proactive.add_calendar_trigger(event["title"], t)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Could not load calendar triggers: {e}")
+
+        # START TASK WORKER
+        self._start_task_worker()
 
         console.print("[dim]  all systems ready.[/dim]")
         console.print("")
@@ -280,6 +306,21 @@ class Lavender:
 
         print_you(text)
         state_engine.update_user_activity()
+
+        # ── REFLEX CHECK ──
+        reflex_response = self.brain._reflex_match(text)
+        if reflex_response:
+            logger.info("Reflex match found. Skipping streaming loop.")
+            print_lavender(self.brain.personality_name, reflex_response)
+            if self.hologram:
+                self.hologram.on_wake()
+                self.hologram.on_speaking(reflex_response)
+            self.voice_out.speak(reflex_response)
+            if self.hologram:
+                self.hologram.on_done_speaking()
+            self.brain._store_turn(text, reflex_response)
+            return
+
         print_status(self.brain.personality_name, "thinking...")
 
         if self.hologram:
@@ -287,26 +328,82 @@ class Lavender:
             self.hologram.on_thinking()
 
         self.proactive.note_interaction()
-        response = self.brain.think(text)
 
-        # Sync personality if it switched inside think()
-        if self.brain.personality_name != personality_before:
-            self.voice_out.set_personality(self.brain.personality_name)
+        full_response = ""
+        # Use sentence streaming to reduce perceived latency
+        for chunk in self.brain.think_streaming(text):
+            if not chunk: continue
+            full_response += " " + chunk
+
+            # Sync personality if it switched (only happens on first chunk usually)
+            if self.brain.personality_name != personality_before:
+                self.voice_out.set_personality(self.brain.personality_name)
+                if self.hologram:
+                    self.hologram.set_personality(self.brain.personality_name)
+                personality_before = self.brain.personality_name
+
+            print_lavender(self.brain.personality_name, chunk)
+
             if self.hologram:
-                self.hologram.set_personality(self.brain.personality_name)
+                panel = self._response_to_panel(chunk)
+                if panel:
+                    self.hologram.show_panel(**panel)
+                else:
+                    self.hologram.on_speaking(chunk)
 
-        print_lavender(self.brain.personality_name, response)
-
-        # Optimize: Trigger hologram and voice output asynchronously where possible
-        # so processing can prepare for next input
-        if self.hologram:
-            self.hologram.on_speaking(response)
-
-        # TTS playback is already interruptible and blocks only for playback duration
-        self.voice_out.speak(response)
+            self.voice_out.speak(chunk)
 
         if self.hologram:
             self.hologram.on_done_speaking()
+
+    def _response_to_panel(self, response: str) -> Optional[dict]:
+        """
+        Convert a tool result response into a hologram panel directive.
+        Returns show_panel kwargs or None (→ use default show_response).
+        """
+        text_lower = response.lower()
+
+        # Weather response
+        if any(w in text_lower for w in ("temperature", "°c", "humidity", "forecast", "rain")):
+            return {
+                "panel_id":   "weather",
+                "content":    response,
+                "content_type": "info",
+                "title":      "Weather",
+                "persist":    False,
+            }
+
+        # Search results
+        if any(w in text_lower for w in ("according to", "search results", "found:")):
+            return {
+                "panel_id":   "search",
+                "content":    response,
+                "content_type": "list",
+                "title":      "Search",
+                "persist":    False,
+            }
+
+        # Code output
+        if "```" in response or any(w in text_lower for w in ("output:", "result:", "executed")):
+            return {
+                "panel_id":   "code",
+                "content":    response,
+                "content_type": "code",
+                "title":      "Code",
+                "persist":    False,
+            }
+
+        # Calendar listing
+        if any(w in text_lower for w in ("events today", "events tomorrow", "no events", " — ")):
+            return {
+                "panel_id":   "calendar",
+                "content":    response,
+                "content_type": "list",
+                "title":      "Calendar",
+                "persist":    False,
+            }
+
+        return None
 
     def _handle_surface(self, control: SurfaceControl):
         if control == SurfaceControl.EMERGENCY_MUTE:
@@ -476,6 +573,24 @@ class Lavender:
                 title=f"{component} recovered", message="Back online.", severity="info"
             )
 
+    # ── TASK WORKER ──
+
+    def _start_task_worker(self):
+        threading.Thread(target=self._task_worker, name="task-worker", daemon=True).start()
+
+    def _task_worker(self):
+        """Processes background tasks autonomously."""
+        while self._running:
+            try:
+                task_data = self._task_queue.get(timeout=1.0)
+                logger.info(f"Executing background task: {task_data}")
+                # Execute task logic...
+                self._task_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Task worker error: {e}")
+
     # ── SHUTDOWN ──────────────────────────────────────────────────────────────
 
     def _shutdown(self):
@@ -497,6 +612,11 @@ class Lavender:
 
         console.print("[dim]Writing session to memory...[/dim]")
         self.brain.close_session()
+
+        # Apply episodic decay
+        decay_days = CONFIG["memory"].get("episodic_decay_days", 90)
+        self.memory.episodic.decay(days_half_life=decay_days)
+
         console.print(f"[dim]{self.brain.get_session_summary()}[/dim]")
         console.print(f"[dim]{self.health.format_status()}[/dim]")
         console.print("[dim]Goodbye.[/dim]\n")
