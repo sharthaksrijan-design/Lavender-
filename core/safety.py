@@ -24,11 +24,12 @@ class SafetyLayer:
     def __init__(self):
         logger.info("Safety layer initialized.")
 
-    def validate_tool_call(self, tool_name: str, arguments: Dict[str, Any]) -> Tuple[bool, str]:
+    def validate_tool_call(self, tool_name: str, arguments: Dict[str, Any], context: Dict[str, Any] = None) -> Tuple[bool, str]:
         """
         Validates a tool call.
         Returns (is_safe, error_message/reason).
         """
+        context = context or {}
         if tool_name == "run_python":
             code = arguments.get("code", "")
             # Basic sanity check (CodeRunner already has a sandbox, but we can add meta-rules here)

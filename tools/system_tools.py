@@ -34,7 +34,9 @@ def read_file(filepath: str) -> str:
 def write_file(filepath: str, content: str) -> str:
     """Writes content to a file."""
     try:
-        Path(filepath).write_text(content)
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
         return f"Successfully wrote to {filepath}"
     except Exception as e:
         return f"Error: {e}"

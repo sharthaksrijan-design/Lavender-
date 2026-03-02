@@ -24,6 +24,7 @@ import time
 from typing import Optional
 from langchain_core.tools import tool
 from core.safety import instance as safety_layer
+from core.state import instance as state_engine
 
 logger = logging.getLogger("lavender.tools")
 
@@ -34,7 +35,14 @@ def safe_tool(func):
 
         # 1. Safety Check
         call_args = kwargs.copy()
-        is_safe, reason = safety_layer.validate_tool_call(tool_name, call_args)
+
+        # Pass system context to safety layer
+        ctx = {
+            "user_state": state_engine.state.user.value,
+            "interaction_count": state_engine.state.interaction_count_1h
+        }
+
+        is_safe, reason = safety_layer.validate_tool_call(tool_name, call_args, context=ctx)
         if not is_safe:
             logger.warning(f"Tool execution BLOCKED: {tool_name} - {reason}")
             return f"Action blocked: {reason}"
