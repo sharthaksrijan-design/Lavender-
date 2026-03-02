@@ -1,0 +1,29 @@
+[Unit]
+Description=Lavender Dashboard
+After=network-online.target lavender.service
+Wants=lavender.service
+
+[Service]
+Type=exec
+User=lavender
+Group=lavender
+
+WorkingDirectory=/opt/lavender
+ExecStart=/opt/lavender/venv/bin/python /opt/lavender/dashboard/app.py
+
+Restart=on-failure
+RestartSec=5s
+
+Environment="PYTHONPATH=/opt/lavender"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/opt/lavender/config/.env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lavender-dashboard
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

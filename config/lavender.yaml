@@ -1,0 +1,88 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LAVENDER — Main Configuration
+# /opt/lavender/config/lavender.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+system:
+  name: "Lavender"
+  default_personality: "nova"
+  wake_words:
+    - "lavender"
+    - "hey lavender"
+  # Seconds of silence before Lavender considers speech finished
+  silence_threshold_seconds: 1.2
+  # Minimum confidence (0.0-1.0) for intent routing before asking for clarity
+  intent_confidence_threshold: 0.75
+  log_level: "INFO"
+
+models:
+  primary: "llama3.1:70b-instruct-q4_K_M"
+  router:  "mistral:7b-instruct-q4_K_M"
+  vision:  "llava:13b"
+  embeddings: "nomic-embed-text"
+
+audio:
+  # Run `python -c "import sounddevice as sd; print(sd.query_devices())"`
+  # to list devices and find the right index or name
+  input_device: null          # null = system default
+  output_device: null         # null = system default
+  sample_rate: 16000
+  channels: 1
+  whisper_model: "medium"     # tiny/base/small/medium/large-v3
+  whisper_language: "en"
+  tts_provider: "elevenlabs"
+  # Volume multiplier for TTS output (0.0 - 2.0)
+  output_volume: 1.0
+
+memory:
+  episodic_db_path: "memory/chroma"
+  semantic_db_path: "memory/semantic.db"
+  # Max conversation turns kept in active session context
+  max_working_memory_turns: 20
+  # Days before episodic memories decay in relevance score
+  episodic_decay_days: 90
+  # Number of relevant memories to inject per query
+  top_k_memories: 3
+
+# Personality-specific overrides
+# These augment the base personality definitions in personality.py
+personalities:
+  iris:
+    tts_stability: 0.85
+    tts_similarity: 0.80
+    tts_style: 0.1          # minimal expression variation
+    max_response_sentences: 3
+
+  nova:
+    tts_stability: 0.70
+    tts_similarity: 0.85
+    tts_style: 0.5
+    max_response_sentences: 8
+
+  vector:
+    tts_stability: 0.80
+    tts_similarity: 0.82
+    tts_style: 0.2
+    max_response_sentences: 10
+
+  solace:
+    tts_stability: 0.90
+    tts_similarity: 0.88
+    tts_style: 0.3
+    max_response_sentences: 5
+
+  lilac:
+    tts_stability: 0.75
+    tts_similarity: 0.90
+    tts_style: 0.6          # more expressive — she means what she says
+    max_response_sentences: 6
+
+# ── TOOLS ──────────────────────────────────────────────────────────────────
+tools:
+  enable_home:        true    # Requires HA_URL + HA_TOKEN in .env
+  enable_code_runner: true    # Sandboxed Python execution
+  enable_web:         true    # DuckDuckGo search + Open-Meteo weather
+
+display:
+  renderer_host: "localhost"
+  renderer_port: 8765

@@ -1,0 +1,51 @@
+[Unit]
+Description=Lavender Spatial AI System
+Documentation=file:///opt/lavender/README.md
+After=network-online.target ollama.service sound.target
+Wants=network-online.target
+Requires=ollama.service
+
+# Restart if Ollama dies and comes back
+BindsTo=ollama.service
+
+[Service]
+Type=exec
+User=lavender
+Group=lavender
+
+WorkingDirectory=/opt/lavender
+ExecStart=/opt/lavender/venv/bin/python /opt/lavender/core/lavender.py
+
+# Give the system 30s to start before marking failed
+TimeoutStartSec=30
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=120s
+StartLimitBurst=5
+
+# Environment
+Environment="PYTHONPATH=/opt/lavender"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/opt/lavender/config/.env
+
+# Resource limits — Lavender uses a lot of RAM for models
+# Adjust based on your hardware
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Give audio group access for microphone and speakers
+SupplementaryGroups=audio video input render
+
+# Logging — goes to journald, also tailed by lavender.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lavender
+
+# Security hardening — still needs GPU and audio, so not fully locked down
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
