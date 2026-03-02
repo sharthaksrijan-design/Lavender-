@@ -128,7 +128,8 @@ pip install --quiet \
     mediapipe \
     pyrealsense2 \
     icalendar \
-    dateparser
+    dateparser \
+    openwakeword
 
 echo "    ✓ Python environment ready"
 echo "    Location: $LAVENDER_ROOT/venv"

@@ -203,7 +203,7 @@ class VoiceOutput:
     # ── ELEVENLABS PLAYBACK ───────────────────────────────────────────────────
 
     def _speak_elevenlabs(self, text: str):
-        """Generate audio via ElevenLabs and stream it."""
+        """Generate audio via ElevenLabs and stream it using PCM for zero-latency."""
         personality = self.current_personality
         voice_id    = self.voice_ids.get(personality)
 
@@ -222,39 +222,42 @@ class VoiceOutput:
         try:
             from elevenlabs import VoiceSettings
 
-            logger.debug(f"Generating TTS: '{text[:60]}...' (voice: {voice_id})")
+            logger.debug(f"Streaming TTS: '{text[:60]}...' (voice: {voice_id})")
 
+            # Use PCM output for true real-time streaming without decoding overhead
             audio_generator = self._client.generate(
                 text=text,
                 voice=voice_id,
                 voice_settings=VoiceSettings(**voice_settings),
                 model=self.model,
                 stream=True,
+                output_format="pcm_44100" # 44.1kHz 16-bit PCM
             )
 
-            # Collect all audio bytes from the stream
-            # Note: For true real-time streaming to audio device, we would need
-            # to feed chunks to sounddevice as they arrive.
-            # For now, we optimized by using ElevenLabs stream=True and joining
-            # to significantly reduce first-byte latency.
-            audio_bytes = b"".join(chunk for chunk in audio_generator if not self._stop_event.is_set())
-
-            if self._stop_event.is_set():
+            if not sd:
+                logger.error("Sounddevice not available.")
                 return
 
-            # Decode and play
-            audio_data, sample_rate = sf.read(
-                io.BytesIO(audio_bytes),
-                dtype="float32"
-            )
-
-            # Apply volume
-            audio_data = audio_data * self.volume
-
-            self._play_audio(audio_data, sample_rate)
+            # Open sounddevice stream for real-time writing
+            with sd.RawOutputStream(
+                samplerate=44100,
+                blocksize=4096,
+                device=self.output_device,
+                channels=1,
+                dtype='int16'
+            ) as stream:
+                for chunk in audio_generator:
+                    if self._stop_event.is_set():
+                        break
+                    if chunk:
+                        # Apply volume using numpy for proper PCM scaling
+                        audio_array = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+                        audio_array *= self.volume
+                        chunk_to_write = audio_array.clip(-32768, 32767).astype(np.int16).tobytes()
+                        stream.write(chunk_to_write)
 
         except Exception as e:
-            logger.error(f"ElevenLabs generation failed: {e}")
+            logger.error(f"ElevenLabs streaming failed: {e}")
             logger.info("Falling back to pyttsx3.")
             self._speak_fallback(text)
 

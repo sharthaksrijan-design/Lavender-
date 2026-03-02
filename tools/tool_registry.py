@@ -266,6 +266,15 @@ def build_toolkit(
     # These are registered here but connected to LavenderMemory in brain.py
     # via a closure. Placeholder definitions shown for documentation.
 
+    # ── SYSTEM TOOLS ──────────────────────────────────────────────────────────
+    try:
+        from tools.system_tools import make_system_tools
+        system_tools = make_system_tools()
+        tools.extend([safe_tool(t) for t in system_tools])
+        logger.info("System tools registered.")
+    except Exception as e:
+        logger.warning(f"System tools unavailable: {e}")
+
     # ── VISION ────────────────────────────────────────────────────────────────
     if enable_vision:
         try:

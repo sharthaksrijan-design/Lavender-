@@ -19,6 +19,8 @@ try:
 except (ImportError, OSError):
     sd = None
 from faster_whisper import WhisperModel
+import openwakeword
+from openwakeword.model import Model
 from typing import Generator, Optional
 import logging
 
@@ -35,22 +37,26 @@ class VoicePerception:
         wake_words: list[str] = None,
         silence_threshold: float = 1.2,
         input_device=None,
+        language: str = "en",
     ):
         self.sample_rate = sample_rate
         self.wake_words = wake_words or ["lavender", "hey lavender"]
         self.silence_threshold = silence_threshold  # seconds of silence = end of speech
         self.input_device = input_device
+        self.language = language
 
         # Internal state
         self._audio_queue: queue.Queue = queue.Queue()
         self._stop_event = threading.Event()
         self._is_listening_actively = False  # True = we heard the wake word, collect full utterance
+        self._last_interaction_time = 0
+        self._conversation_window = 30.0 # 30s follow-up window
 
         # Audio buffer for look-back (captures audio before wake word is processed)
         # Faster-Whisper has latency; we buffer so we don't miss the start of speech
         self._audio_buffer: list = []
         self._buffer_max_seconds = 6
-        self._buffer_max_chunks = int(self._buffer_max_seconds * sample_rate / 4000)
+        self._buffer_max_chunks = int(self._buffer_max_seconds * sample_rate / 1280) # openWakeWord uses 1280 samples
 
         logger.info(f"Loading Whisper model '{model_size}' on {device}...")
         self.model = WhisperModel(
@@ -61,6 +67,14 @@ class VoicePerception:
             cpu_threads=4 if device == "cpu" else 1,
         )
         logger.info("Whisper model loaded.")
+
+        # Initialize openWakeWord
+        logger.info("Loading openWakeWord model...")
+        self.oww_model = Model(
+            wakeword_models=["hey_jarvis", "alexa"], # placeholders or custom models
+            inference_framework="onnx"
+        )
+        logger.info("openWakeWord ready.")
 
     # ── AUDIO CALLBACK ───────────────────────────────────────────────────────
 
@@ -89,7 +103,7 @@ class VoicePerception:
         """
         segments, info = self.model.transcribe(
             audio,
-            language="en",
+            language=self.language, # Language lock
             vad_filter=True,
             vad_parameters={
                 "min_silence_duration_ms": int(self.silence_threshold * 1000),
@@ -168,94 +182,66 @@ class VoicePerception:
 
     def listen(self) -> Generator[str, None, None]:
         """
-        Main entry point. Call in a loop.
-        Yields clean transcribed utterances (wake word stripped).
-
-        Usage:
-            for text in voice.listen():
-                handle(text)
-
-        The wake word can appear anywhere in the flow:
-          - Passive mode: waiting for wake word in rolling chunks
-          - After wake word: collects full utterance, transcribes, yields
-          - If the full utterance is in the same chunk as the wake word, handles it
+        Main entry point. Optimized with openWakeWord and Conversation Mode.
         """
-        logger.info(f"Listening for wake words: {self.wake_words}")
-        logger.info("Passive listen mode active.")
+        logger.info(f"Listening with openWakeWord: {self.wake_words}")
 
         if sd is None:
             logger.error("Sounddevice/PortAudio not available. Voice input disabled.")
             return
 
+        # openWakeWord requires 16kHz, mono, 16-bit PCM or 32-bit float
+        # Chunk size for OWW is usually 1280 samples (80ms at 16kHz)
+        chunk_size = 1280
+
         with sd.InputStream(
             samplerate=self.sample_rate,
             channels=1,
             dtype="float32",
-            blocksize=4000,         # ~0.25s per chunk
+            blocksize=chunk_size,
             device=self.input_device,
             callback=self._audio_callback,
         ):
             while not self._stop_event.is_set():
-
-                # ── PASSIVE PHASE ──
-                # Collect ~2 seconds of audio, quick-transcribe for wake word
-                passive_audio = []
-                passive_target_chunks = 8  # ~2 seconds
-
-                for _ in range(passive_target_chunks):
-                    try:
-                        chunk = self._audio_queue.get(timeout=0.5)
-                        passive_audio.append(chunk)
-                    except queue.Empty:
-                        continue
-
-                if not passive_audio:
+                try:
+                    chunk = self._audio_queue.get(timeout=1.0)
+                except queue.Empty:
                     continue
 
-                audio_np = np.concatenate(passive_audio)
+                # ── CONVERSATION MODE CHECK ──
+                # If we're within the 30s window, skip wake word and go straight to collection
+                in_conversation = (time.time() - self._last_interaction_time) < self._conversation_window
 
-                # Quick transcription — small audio, fast pass
-                quick_text = self._transcribe(audio_np)
-
-                if not quick_text:
+                if in_conversation:
+                    # Collect and transcribe immediately
+                    logger.info("Conversation mode: active.")
+                    utterance_audio = self._collect_audio(max_seconds=12.0)
+                    text = self._transcribe(utterance_audio)
+                    if text:
+                        self._last_interaction_time = time.time()
+                        yield text
                     continue
 
-                if not self._contains_wake_word(quick_text):
-                    logger.debug(f"No wake word in: '{quick_text}'")
-                    continue
+                # ── PASSIVE PHASE (openWakeWord) ──
+                # Feed chunk to OWW
+                prediction = self.oww_model.predict(chunk)
 
-                # ── WAKE WORD DETECTED ──
-                logger.info(f"Wake word detected in: '{quick_text}'")
+                # Check all active models
+                wake_word_triggered = False
+                for model_name, score in prediction.items():
+                    if score > 0.5: # Threshold
+                        logger.info(f"Wake word '{model_name}' detected (score: {score:.2f})")
+                        wake_word_triggered = True
+                        break
 
-                # Strip the wake word from whatever we already have
-                initial_text = self._strip_wake_word(quick_text)
-
-                # If there's already a full command in the same utterance, use it
-                if len(initial_text.split()) >= 2:
-                    logger.info(f"Full utterance captured with wake word: '{initial_text}'")
-                    yield initial_text
-                    continue
-
-                # Otherwise, collect the rest of the utterance
-                logger.info("Collecting remainder of utterance...")
-                remainder_audio = self._collect_audio(max_seconds=12.0)
-
-                if len(remainder_audio) < self.sample_rate * 0.3:
-                    # Less than 0.3s of audio — probably nothing meaningful
-                    logger.debug("Remainder too short, ignoring.")
-                    continue
-
-                remainder_text = self._transcribe(remainder_audio)
-
-                # Combine initial + remainder (both stripped of wake word)
-                full_text = (initial_text + " " + remainder_text).strip()
-                full_text = self._strip_wake_word(full_text)  # Safety pass
-
-                if full_text:
-                    logger.info(f"Yielding: '{full_text}'")
-                    yield full_text
-                else:
-                    logger.debug("Empty utterance after wake word, ignoring.")
+                if wake_word_triggered:
+                    # ── WAKE WORD DETECTED ──
+                    logger.info("Collecting utterance...")
+                    utterance_audio = self._collect_audio(max_seconds=12.0)
+                    text = self._transcribe(utterance_audio)
+                    if text:
+                        self._last_interaction_time = time.time()
+                        yield text
 
     def stop(self):
         """Signal the listen loop to stop."""

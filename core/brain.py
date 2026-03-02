@@ -42,6 +42,7 @@ TOOL_INTENTS = {
     "operational_device",
     "computational",
     "perceptual",
+    "operational_async",   # Background tasks
 }
 
 
@@ -74,6 +75,7 @@ CATEGORIES:
 - operational_calendar: meetings, reminders, scheduling, time
 - computational: code generation, execution, math, data analysis
 - perceptual: analyze image, read document, describe what is visible
+- operational_async: long running tasks, background jobs, monitoring
 - system_personality_switch: user wants to change personality (iris/nova/vector/solace/lilac)
 - system_memory: user asks about or wants to modify Lavender's memory
 - system_other: settings, configuration, meta questions about Lavender
@@ -300,9 +302,36 @@ class LavenderBrain:
     def _store_turn(self, user_text: str, assistant_text: str):
         self._session_history.append({"role": "user",      "content": user_text})
         self._session_history.append({"role": "assistant", "content": assistant_text})
+
+        # ── MID-SESSION CHECKPOINT ──
+        # Summarize every 40 turns (20 user inputs) to background memory
+        if len(self._session_history) % 40 == 0:
+            logger.info("Triggering mid-session memory checkpoint...")
+            threading.Thread(target=self._run_checkpoint, daemon=True).start()
+
         # Trim if over limit
         while len(self._session_history) > self.max_working_memory * 2:
             self._session_history.pop(0)
+
+    def _run_checkpoint(self):
+        """Background summarization of recent history."""
+        try:
+            # Summarize the last 40 turns
+            recent = self._session_history[-40:]
+            result = self._summarizer.process_session(recent, self.personality_name)
+
+            if result["summary"]:
+                self.memory.store_session(
+                    summary=f"[Checkpoint] {result['summary']}",
+                    personality=self.personality_name,
+                    tags=result["tags"],
+                    importance=result["importance"] * 0.8, # Checkpoints slightly less important than final
+                )
+            if result["facts"]:
+                self.memory.store_facts_bulk(result["facts"])
+            logger.info("Mid-session checkpoint complete.")
+        except Exception as e:
+            logger.error(f"Checkpoint failed: {e}")
 
     # ── CORE REASONING ────────────────────────────────────────────────────────
 
@@ -439,17 +468,37 @@ class LavenderBrain:
             + [HumanMessage(content=user_text)]
         )
 
-        # ── STEP 2: EXECUTION ──
+        # ── STEP 2: EXECUTION & REFLECTION ──
         try:
-            result = self._agent.invoke({"messages": input_messages})
-            messages_out = result.get("messages", [])
-            for msg in reversed(messages_out):
-                if hasattr(msg, "content") and msg.content:
-                    # Skip tool call messages, get the final text response
-                    if not getattr(msg, "tool_calls", None):
-                        return msg.content.strip()
-            # Fallback
-            return str(messages_out[-1].content).strip() if messages_out else ""
+            # We loop to allow for reflection/self-correction
+            max_reflection_steps = 2
+            current_messages = input_messages
+
+            for _ in range(max_reflection_steps):
+                result = self._agent.invoke({"messages": current_messages})
+                messages_out = result.get("messages", [])
+
+                # Extract last AI response
+                last_ai_msg = None
+                for msg in reversed(messages_out):
+                    if hasattr(msg, "content") and msg.content and not getattr(msg, "tool_calls", None):
+                        last_ai_msg = msg.content.strip()
+                        break
+
+                if not last_ai_msg: break
+
+                # Evaluate result
+                eval_prompt = f"Original Goal: {user_text}\nExecution Result: {last_ai_msg}\n\nDid this successfully achieve the goal? Respond with 'YES' or provide instructions for correction."
+                eval_resp = self.llm.invoke([SystemMessage(content="You are a self-evaluator."), HumanMessage(content=eval_prompt)])
+
+                if eval_resp.content.strip().upper() == "YES":
+                    return last_ai_msg
+                else:
+                    logger.info(f"Reflection triggered correction: {eval_resp.content}")
+                    current_messages.append(AIMessage(content=last_ai_msg))
+                    current_messages.append(HumanMessage(content=f"Correction needed: {eval_resp.content}"))
+
+            return last_ai_msg or "Failed to execute task."
 
         except Exception as e:
             logger.error(f"Agent execution failed: {e}. Falling back to LLM.")
@@ -517,8 +566,19 @@ class LavenderBrain:
             return self.switch_personality(target_name.lower())
 
         if intent == Intent.SYSTEM_MEMORY and self.memory:
-            # "What do you remember about X?" or "Forget X"
+            # "Remember that I prefer X" or "Forget X"
             text_lower = text.lower()
+
+            # IMMEDIATE FACT EXTRACTION
+            if "remember that" in text_lower or "keep in mind that" in text_lower:
+                logger.info("Extracting immediate fact from user request.")
+                facts = self._summarizer.extract_facts([{"role": "user", "content": text}])
+                if facts:
+                    self.memory.store_facts_bulk(facts)
+                    # Respond based on first fact
+                    f = facts[0]
+                    return f"Noted. I'll remember that {f['key'].replace('_', ' ')} is {f['value']}."
+
             if any(w in text_lower for w in ("forget", "delete", "remove")):
                 topic = target or text.replace("forget", "").replace("delete", "").strip()
                 return self.memory.user_delete(topic)

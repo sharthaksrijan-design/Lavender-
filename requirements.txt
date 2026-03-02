@@ -26,3 +26,6 @@ mss
 Pillow
 icalendar
 dateparser
+openwakeword
+scikit-learn
+scipy
