@@ -162,6 +162,7 @@ class Lavender:
             enable_code_runner=tools_cfg.get("enable_code_runner", True),
             enable_web=tools_cfg.get("enable_web", True),
             enable_home=tools_cfg.get("enable_home", True),
+            enable_vision=tools_cfg.get("enable_vision", True),
         )
 
         # M1: BRAIN
@@ -174,6 +175,9 @@ class Lavender:
             max_working_memory=CONFIG["memory"]["max_working_memory_turns"],
             memory=self.memory,
             tools=self.toolkit,
+            top_k_memories=CONFIG["memory"].get("top_k_memories", 3),
+            intent_threshold=CONFIG["system"].get("intent_confidence_threshold", 0.75),
+            personality_overrides=CONFIG.get("personalities", {}),
         )
 
         # M3: HOLOGRAM
@@ -522,6 +526,11 @@ class Lavender:
 
         console.print("[dim]Writing session to memory...[/dim]")
         self.brain.close_session()
+
+        # Apply episodic decay
+        decay_days = CONFIG["memory"].get("episodic_decay_days", 90)
+        self.memory.episodic.decay(days_half_life=decay_days)
+
         console.print(f"[dim]{self.brain.get_session_summary()}[/dim]")
         console.print(f"[dim]{self.health.format_status()}[/dim]")
         console.print("[dim]Goodbye.[/dim]\n")

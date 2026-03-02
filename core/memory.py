@@ -197,6 +197,7 @@ class EpisodicMemory:
                 "personality": meta.get("personality"),
                 "timestamp":   meta.get("timestamp"),
                 "tags":        json.loads(meta.get("tags", "[]")),
+                "relevance":   meta.get("relevance", 1.0),
             })
         return sorted(episodes, key=lambda x: x["timestamp"], reverse=True)
 

@@ -62,12 +62,20 @@ GOAL: "{goal}"
 """
 
 class Planner:
-    def __init__(self, model: str = "llama3.1:70b-instruct-q4_K_M", ollama_base_url: str = "http://localhost:11434"):
-        self.llm = ChatOllama(
-            model=model,
-            base_url=ollama_base_url,
-            temperature=0.1, # Planners need to be deterministic
-        )
+    def __init__(self, model: str = "llama3.1:8b-instruct-q4_K_M", ollama_base_url: str = "http://localhost:11434"):
+        self._model = model
+        self._base_url = ollama_base_url
+        self._llm = None
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = ChatOllama(
+                model=self._model,
+                base_url=self._base_url,
+                temperature=0.1, # Planners need to be deterministic
+            )
+        return self._llm
 
     def generate_plan(self, goal: str, tools_description: str) -> Optional[GoalPlan]:
         logger.info(f"Generating plan for goal: {goal}")
@@ -99,4 +107,5 @@ class Planner:
             logger.error(f"Failed to generate plan: {e}")
             return None
 
+# Lazy instance - don't initialize LLM on import
 instance = Planner()

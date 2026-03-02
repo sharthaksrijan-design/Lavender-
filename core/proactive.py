@@ -205,6 +205,9 @@ class ProactiveEngine:
 
     def _run(self):
         while not self._stop.wait(10.0):
+            # Update state engine context
+            state_engine.tick()
+
             # Context Awareness: Don't speak if user is in FOCUS mode
             if state_engine.state.user == UserState.FOCUS:
                 logger.debug("Proactive trigger skipped (User in Focus mode)")

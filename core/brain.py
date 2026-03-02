@@ -32,7 +32,6 @@ from core.memory import LavenderMemory
 from core.summarizer import SessionSummarizer
 from core.state import instance as state_engine
 from core.planner import instance as planner_engine
-from core.safety import instance as safety_layer
 from tools.tool_registry import describe_toolkit
 
 logger = logging.getLogger("lavender.brain")
@@ -42,6 +41,7 @@ TOOL_INTENTS = {
     "informational_realtime",
     "operational_device",
     "computational",
+    "perceptual",
 }
 
 
@@ -113,6 +113,9 @@ class LavenderBrain:
         max_working_memory: int = 20,
         memory: Optional[LavenderMemory] = None,
         tools: list = None,
+        top_k_memories: int = 3,
+        intent_threshold: float = 0.75,
+        personality_overrides: dict = None,
     ):
         self.current_personality: PersonalityConfig = get_personality(personality)
         self.max_working_memory = max_working_memory
@@ -128,6 +131,9 @@ class LavenderBrain:
 
         # Memory (optional — Milestone 2)
         self.memory: Optional[LavenderMemory] = memory
+        self.top_k_memories = top_k_memories
+        self.intent_threshold = intent_threshold
+        self.personality_overrides = personality_overrides or {}
         self._summarizer: Optional[SessionSummarizer] = (
             SessionSummarizer(model=primary_model, ollama_base_url=ollama_base_url)
             if memory else None
@@ -304,6 +310,12 @@ class LavenderBrain:
         """Build the full system prompt with memory and world state injected."""
         system_content = self.current_personality.system_prompt
 
+        # Enforce sentence limit if defined in config/overrides
+        overrides = self.personality_overrides.get(self.current_personality.name, {})
+        max_sentences = overrides.get("max_response_sentences")
+        if max_sentences:
+            system_content += f"\n\nCRITICAL RULE: Your response MUST be {max_sentences} sentences or less."
+
         # Inject World State
         ctx = state_engine.get_context_summary()
         state_prompt = (
@@ -318,7 +330,7 @@ class LavenderBrain:
         system_content += state_prompt
 
         if self.memory:
-            memory_context = self.memory.recall_for_query(user_text)
+            memory_context = self.memory.recall_for_query(user_text, top_k=self.top_k_memories)
             if memory_context:
                 system_content += f"\n\nLONG-TERM MEMORY:\n{memory_context}"
         if extra_context:
@@ -419,7 +431,8 @@ class LavenderBrain:
         Main entry point. Takes raw user text, returns Lavender's response string.
 
         Flow:
-          1. Route intent
+          0. Reflex match
+          1. Route intent (with confidence threshold)
           2. Handle system intents directly (personality switch, etc.)
           3. Lilac pre-processing (if active)
           4. Call LLM with personality prompt + session history
@@ -443,6 +456,11 @@ class LavenderBrain:
         intent_result = self.route(text)
         intent         = intent_result.get("intent", Intent.CONVERSATIONAL)
         target         = intent_result.get("target")
+
+        # Wire confidence threshold
+        if intent_result.get("confidence", 1.0) < self.intent_threshold:
+            logger.info(f"Intent confidence low ({intent_result.get('confidence')}), falling back to conversational.")
+            intent = Intent.CONVERSATIONAL
 
         # ── STEP 2: SYSTEM INTENTS ────────────────────────────────────────────
         if intent == Intent.SYSTEM_PERSONALITY:

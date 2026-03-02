@@ -67,6 +67,7 @@ def build_toolkit(
     enable_code_runner: bool = True,
     enable_web: bool = True,
     enable_home: bool = True,
+    enable_vision: bool = True,
 ):
     """
     Build and return the full list of LangGraph tools.
@@ -254,7 +255,7 @@ def build_toolkit(
     # via a closure. Placeholder definitions shown for documentation.
 
     # ── VISION ────────────────────────────────────────────────────────────────
-    if enable_web:  # reuse the enable_web flag — vision also needs Ollama
+    if enable_vision:
         try:
             from tools.vision import Vision, make_vision_tools
             _vision = Vision(

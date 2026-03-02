@@ -122,14 +122,24 @@ class CodeRunner:
                     if node.func.id in ("exec", "eval", "compile", "__import__"):
                         return f"'{node.func.id}()' is not allowed in sandboxed execution."
 
-            # Block open() with write modes
+            # Block open() with write modes (both positional and keyword arguments)
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and node.func.id == "open":
-                    if node.args and len(node.args) > 1:
+                    mode = "r" # default
+
+                    # Positional mode argument
+                    if len(node.args) > 1:
                         mode_node = node.args[1]
                         if isinstance(mode_node, ast.Constant):
-                            if any(c in mode_node.value for c in ("w", "a", "x")):
-                                return "File writing is not allowed in sandboxed execution."
+                            mode = mode_node.value
+
+                    # Keyword mode argument (overrides positional)
+                    for kw in node.keywords:
+                        if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                            mode = kw.value.value
+
+                    if any(c in mode for c in ("w", "a", "x")):
+                        return "File writing is not allowed in sandboxed execution."
 
         return None
 

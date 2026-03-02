@@ -84,6 +84,7 @@ tools:
   enable_home:        true    # Requires HA_URL + HA_TOKEN in .env
   enable_code_runner: true    # Sandboxed Python execution
   enable_web:         true    # DuckDuckGo search + Open-Meteo weather
+  enable_vision:      true    # Needs ollama pull llava:13b
 
 display:
   renderer_host: "localhost"
