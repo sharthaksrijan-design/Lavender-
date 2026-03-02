@@ -24,6 +24,7 @@ import time
 from typing import Optional
 from langchain_core.tools import tool
 from core.safety import instance as safety_layer
+from core.state import instance as state_engine
 
 logger = logging.getLogger("lavender.tools")
 
@@ -34,7 +35,14 @@ def safe_tool(func):
 
         # 1. Safety Check
         call_args = kwargs.copy()
-        is_safe, reason = safety_layer.validate_tool_call(tool_name, call_args)
+
+        # Pass system context to safety layer
+        ctx = {
+            "user_state": state_engine.state.user.value,
+            "interaction_count": state_engine.state.interaction_count_1h
+        }
+
+        is_safe, reason = safety_layer.validate_tool_call(tool_name, call_args, context=ctx)
         if not is_safe:
             logger.warning(f"Tool execution BLOCKED: {tool_name} - {reason}")
             return f"Action blocked: {reason}"
@@ -274,6 +282,24 @@ def build_toolkit(
         logger.info("System tools registered.")
     except Exception as e:
         logger.warning(f"System tools unavailable: {e}")
+
+    # ── COMMUNICATION TOOLS ────────────────────────────────────────────────────
+    try:
+        from tools.communication import make_communication_tools
+        comm_tools = make_communication_tools()
+        tools.extend([safe_tool(t) for t in comm_tools])
+        logger.info("Communication tools registered.")
+    except Exception as e:
+        logger.warning(f"Communication tools unavailable: {e}")
+
+    # ── SOCIAL MEDIA TOOLS ────────────────────────────────────────────────────
+    try:
+        from tools.social import make_social_tools
+        social_tools = make_social_tools()
+        tools.extend([safe_tool(t) for t in social_tools])
+        logger.info("Social media tools registered.")
+    except Exception as e:
+        logger.warning(f"Social media tools unavailable: {e}")
 
     # ── VISION ────────────────────────────────────────────────────────────────
     if enable_vision:

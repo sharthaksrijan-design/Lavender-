@@ -424,9 +424,12 @@ class Lavender:
 
     def _handle_surface(self, control: SurfaceControl):
         if control == SurfaceControl.EMERGENCY_MUTE:
+            from core.safety import instance as safety
+            safety.activate_hard_stop() # Escalate mute to hard stop
             self.voice_out.interrupt()
             if self.hologram:
                 self.hologram.set_waveform(WaveformState.IDLE)
+                self.hologram.show_alert("EMERGENCY STOP", "All actions blocked.", severity="critical")
 
         elif control == SurfaceControl.PAUSE_RESUME:
             pass  # Fusion layer handles state
@@ -485,11 +488,16 @@ class Lavender:
             self.handle(intent)
 
     def _run_text_mode(self):
-        console.print("[dim]Text mode. Type input. 'quit' to exit.[/dim]\n")
+        console.print("[dim]Text mode. Type input. 'quit' to exit. 'STOP' for emergency shutdown.[/dim]\n")
         while self._running:
             try:
                 text = input().strip()
                 if not text:
+                    continue
+                if text == "STOP":
+                    from core.safety import instance as safety
+                    safety.activate_hard_stop()
+                    console.print("[bold red]EMERGENCY STOP ACTIVATED.[/bold red]")
                     continue
                 if text.lower() in ("quit", "exit", "q"):
                     break

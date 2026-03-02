@@ -14,6 +14,7 @@ import json
 import random
 import time
 import logging
+import threading
 from typing import Optional
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
@@ -32,6 +33,8 @@ from core.memory import LavenderMemory
 from core.summarizer import SessionSummarizer
 from core.state import instance as state_engine
 from core.planner import instance as planner_engine
+from core.task_state import instance as task_engine, TaskStatus, Step
+from core.safety import instance as safety_layer
 from tools.tool_registry import describe_toolkit
 
 logger = logging.getLogger("lavender.brain")
@@ -429,23 +432,30 @@ class LavenderBrain:
     def _call_agent(self, user_text: str) -> str:
         """
         Run the LangGraph ReAct agent for tool-using intents.
-        Now enhanced with goal planning and safety validation.
+        Enhanced with Task State tracking, Feedback Loops, and Dynamic Replanning.
         """
         if not self._tools:
             return self._call_llm(user_text)
 
-        # ── STEP 1: PLANNING ──
-        # For complex inputs, generate a structured plan first
-        plan_context = ""
-        if len(user_text.split()) > 8:
-            tools_desc = describe_toolkit(self._tools)
-            plan = planner_engine.generate_plan(user_text, tools_desc)
-            if plan:
-                logger.info(f"Planner generated {len(plan.tasks)} tasks.")
-                plan_context = "DECOMPOSED EXECUTION PLAN:\n"
-                for tid, task in plan.tasks.items():
-                    plan_context += f"- {tid}: {task.description} (using {task.tool or 'reasoning'})\n"
-                plan_context += "\nFollow this plan step-by-step."
+        # ── STEP 1: DEEP PLANNING ──
+        tools_desc = describe_toolkit(self._tools)
+
+        # Pull preferences from memory to influence plan
+        user_context = ""
+        if self.memory:
+            user_context = self.memory.semantic.format_for_context(["preference", "habit", "decision"])
+
+        plan = planner_engine.generate_plan(f"{user_text}\nCONTEXT: {user_context}", tools_desc)
+
+        if not plan:
+            return self._call_llm(user_text) # Fallback if planning fails
+
+        # Create explicit task session
+        session = task_engine.create_session(
+            goal=user_text,
+            steps=[{"description": t.description, "tool": t.tool, "args": t.args} for t in plan.tasks.values()]
+        )
+        session.status = TaskStatus.IN_PROGRESS
 
         # Build agent once, reuse across calls
         if self._agent is None:
@@ -458,7 +468,7 @@ class LavenderBrain:
             self._agent = create_react_agent(llm_with_tools, self._tools)
             logger.info(f"ReAct agent built with {len(self._tools)} tools.")
 
-        system_content = self._get_system_prompt(user_text, extra_context=plan_context)
+        system_content = self._get_system_prompt(user_text)
 
         # Build messages for the agent
         history = self._build_message_history()
@@ -468,37 +478,60 @@ class LavenderBrain:
             + [HumanMessage(content=user_text)]
         )
 
-        # ── STEP 2: EXECUTION & REFLECTION ──
+        # ── STEP 2: ADAPTIVE EXECUTION LOOP ──
         try:
-            # We loop to allow for reflection/self-correction
-            max_reflection_steps = 2
-            current_messages = input_messages
+            while session.current_step_index < len(session.steps):
+                step = session.current_step()
+                logger.info(f"Executing Step {session.current_step_index + 1}: {step.description}")
 
-            for _ in range(max_reflection_steps):
+                # Inject current progress into context
+                progress_context = task_engine.format_progress(session.id)
+                current_messages = (
+                    [SystemMessage(content=f"{system_content}\n\nCURRENT PROGRESS:\n{progress_context}")]
+                    + history
+                    + [HumanMessage(content=f"Execute the NEXT step: {step.description}")]
+                )
+
+                # Run agent for this specific step
                 result = self._agent.invoke({"messages": current_messages})
                 messages_out = result.get("messages", [])
 
-                # Extract last AI response
                 last_ai_msg = None
                 for msg in reversed(messages_out):
                     if hasattr(msg, "content") and msg.content and not getattr(msg, "tool_calls", None):
                         last_ai_msg = msg.content.strip()
                         break
 
-                if not last_ai_msg: break
-
-                # Evaluate result
-                eval_prompt = f"Original Goal: {user_text}\nExecution Result: {last_ai_msg}\n\nDid this successfully achieve the goal? Respond with 'YES' or provide instructions for correction."
-                eval_resp = self.llm.invoke([SystemMessage(content="You are a self-evaluator."), HumanMessage(content=eval_prompt)])
+                # ── FEEDBACK LOOP ──
+                eval_prompt = (
+                    f"Goal: {step.description}\n"
+                    f"Result: {last_ai_msg}\n\n"
+                    "Did this step succeed? Respond with 'YES' or a description of the error."
+                )
+                eval_resp = self.llm.invoke([SystemMessage(content="You are an execution validator."), HumanMessage(content=eval_prompt)])
 
                 if eval_resp.content.strip().upper() == "YES":
-                    return last_ai_msg
+                    task_engine.update_step(session.id, session.current_step_index, status=TaskStatus.COMPLETED, result=last_ai_msg)
+                    session.current_step_index += 1
                 else:
-                    logger.info(f"Reflection triggered correction: {eval_resp.content}")
-                    current_messages.append(AIMessage(content=last_ai_msg))
-                    current_messages.append(HumanMessage(content=f"Correction needed: {eval_resp.content}"))
+                    # ── DYNAMIC REPLANNING ──
+                    logger.warning(f"Step failed: {eval_resp.content}. Triggering replan.")
+                    session.status = TaskStatus.REPLANNING
+                    new_plan = planner_engine.generate_plan(
+                        f"REPLANNING for goal: {user_text}\nFailed at step: {step.description}\nError: {eval_resp.content}\nProgress so far: {progress_context}",
+                        tools_desc
+                    )
+                    if new_plan:
+                        # Append new steps or replace remaining
+                        new_steps = [Step(description=t.description, tool=t.tool, args=t.args) for t in new_plan.tasks.values()]
+                        session.steps = session.steps[:session.current_step_index] + new_steps
+                        session.status = TaskStatus.IN_PROGRESS
+                        logger.info(f"Replanning successful. New steps: {len(new_steps)}")
+                    else:
+                        return f"Task failed at step: {step.description}. Error: {eval_resp.content}"
 
-            return last_ai_msg or "Failed to execute task."
+            session.status = TaskStatus.COMPLETED
+            return f"Goal achieved: {user_text}\n\nFinal Report:\n{last_ai_msg}"
 
         except Exception as e:
             logger.error(f"Agent execution failed: {e}. Falling back to LLM.")
@@ -538,6 +571,17 @@ class LavenderBrain:
         text = text.strip()
         if not text:
             return ""
+
+        # ── STEP -1: SAFETY/CONFIRMATION OVERRIDE ──
+        t_low = text.lower().strip()
+        if t_low in ("approve", "confirm", "yes do it", "proceed", "okay"):
+            logger.info("User confirmed pending sensitive action.")
+            safety_layer.set_user_confirmed(True)
+            # Re-run the last attempted interaction if possible, or just signal ok
+            # For simplicity, we signal the safety layer and proceed
+        else:
+            # Clear confirmation for new requests
+            safety_layer.set_user_confirmed(False)
 
         # ── STEP 0: REFLEX ──
         reflex_response = self._reflex_match(text)
@@ -615,6 +659,10 @@ class LavenderBrain:
             return "I ran into an issue processing that. Try again."
 
         # ── STEP 5: STORE TURN ────────────────────────────────────────────────
+        # If action was blocked for confirmation, don't finalize turn yet
+        if "Action blocked: Confirmation required" in response:
+            return f"I need your permission to proceed: {response.split(':')[-1].strip()}. Say 'approve' to continue."
+
         self._store_turn(text, response)
 
         # ── STEP 6: RETURN ────────────────────────────────────────────────────

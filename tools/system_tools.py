@@ -34,7 +34,9 @@ def read_file(filepath: str) -> str:
 def write_file(filepath: str, content: str) -> str:
     """Writes content to a file."""
     try:
-        Path(filepath).write_text(content)
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
         return f"Successfully wrote to {filepath}"
     except Exception as e:
         return f"Error: {e}"
@@ -56,8 +58,24 @@ def get_system_summary() -> str:
     except Exception as e:
         return f"Error: {e}"
 
+def run_command(command: str) -> str:
+    """Runs a shell command (careful!)."""
+    try:
+        result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
+        return result.decode()
+    except Exception as e:
+        return f"Error: {e}"
+
 def make_system_tools() -> List:
     from langchain_core.tools import tool
+
+    @tool
+    def system_command(cmd: str) -> str:
+        """
+        Executes a raw shell command.
+        HIGHLY SENSITIVE. Requires confirmation.
+        """
+        return run_command(cmd)
 
     @tool
     def file_ops(action: str, path: str, content: Optional[str] = None) -> str:
@@ -86,4 +104,4 @@ def make_system_tools() -> List:
         """Get host system status."""
         return get_system_summary()
 
-    return [file_ops, launch_app, system_status]
+    return [file_ops, launch_app, system_status, system_command]
