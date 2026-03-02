@@ -28,6 +28,7 @@ import sys
 import signal
 import logging
 import threading
+import queue
 import argparse
 import time
 import yaml
@@ -252,6 +253,9 @@ class Lavender:
         )
         self.health.start()
 
+        # TASK QUEUE
+        self._task_queue = queue.Queue()
+
         # PROACTIVE ENGINE
         console.print("[dim]  proactive...[/dim]", end="\r")
         self.proactive = ProactiveEngine(
@@ -261,6 +265,9 @@ class Lavender:
             session_start=time.time(),
         )
         self.proactive.start()
+
+        # START TASK WORKER
+        self._start_task_worker()
 
         console.print("[dim]  all systems ready.[/dim]")
         console.print("")
@@ -475,6 +482,24 @@ class Lavender:
             self.hologram.show_alert(
                 title=f"{component} recovered", message="Back online.", severity="info"
             )
+
+    # ── TASK WORKER ──
+
+    def _start_task_worker(self):
+        threading.Thread(target=self._task_worker, name="task-worker", daemon=True).start()
+
+    def _task_worker(self):
+        """Processes background tasks autonomously."""
+        while self._running:
+            try:
+                task_data = self._task_queue.get(timeout=1.0)
+                logger.info(f"Executing background task: {task_data}")
+                # Execute task logic...
+                self._task_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Task worker error: {e}")
 
     # ── SHUTDOWN ──────────────────────────────────────────────────────────────
 

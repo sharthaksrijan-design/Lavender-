@@ -20,11 +20,46 @@ Adding a new tool:
 import json
 import logging
 import os
+import time
 from typing import Optional
 from langchain_core.tools import tool
+from core.safety import instance as safety_layer
 
 logger = logging.getLogger("lavender.tools")
 
+def safe_tool(func):
+    """Decorator to wrap tools with safety and retry logic."""
+    def wrapper(*args, **kwargs):
+        tool_name = func.name if hasattr(func, 'name') else func.__name__
+
+        # 1. Safety Check
+        call_args = kwargs.copy()
+        is_safe, reason = safety_layer.validate_tool_call(tool_name, call_args)
+        if not is_safe:
+            logger.warning(f"Tool execution BLOCKED: {tool_name} - {reason}")
+            return f"Action blocked: {reason}"
+
+        # 2. Execution with Retry logic
+        max_retries = 2
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                logger.error(f"Tool {tool_name} failed (attempt {attempt+1}/{max_retries+1}): {e}")
+                if attempt < max_retries:
+                    time.sleep(0.5 * (attempt + 1)) # Exponential backoff
+
+        return f"Error: Tool {tool_name} failed after {max_retries+1} attempts. Last error: {last_error}"
+
+    # Preserve metadata for LangGraph
+    wrapper.__name__ = func.__name__
+    wrapper.__doc__ = func.__doc__
+    if hasattr(func, 'args_schema'):
+        wrapper.args_schema = func.args_schema
+    return wrapper
 
 def build_toolkit(
     ha_url: str = None,
@@ -57,6 +92,7 @@ def build_toolkit(
 
             if _hc:
                 @tool
+                @safe_tool
                 def control_device(command_json: str) -> str:
                     """
                     Control a smart home device via Home Assistant.
@@ -128,6 +164,7 @@ def build_toolkit(
             _runner = CodeRunner(timeout_seconds=15.0)
 
             @tool
+            @safe_tool
             def run_python(code: str) -> str:
                 """
                 Execute Python code and return the output.

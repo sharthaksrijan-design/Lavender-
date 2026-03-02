@@ -33,6 +33,7 @@ from core.summarizer import SessionSummarizer
 from core.state import instance as state_engine
 from core.planner import instance as planner_engine
 from core.safety import instance as safety_layer
+from tools.tool_registry import describe_toolkit
 
 logger = logging.getLogger("lavender.brain")
 
@@ -342,29 +343,36 @@ class LavenderBrain:
         Run the LangGraph ReAct agent for tool-using intents.
         Now enhanced with goal planning and safety validation.
         """
-        # Step 1: Planning
-        # If the input seems complex, we could trigger the planner here.
-        # For Milestone 4+, we let LangGraph handle the step-by-step reasoning
-        # but we can pre-plan for very complex goals.
         if not self._tools:
-            # No tools available — fall back to plain LLM
             return self._call_llm(user_text)
+
+        # ── STEP 1: PLANNING ──
+        # For complex inputs, generate a structured plan first
+        plan_context = ""
+        if len(user_text.split()) > 8:
+            tools_desc = describe_toolkit(self._tools)
+            plan = planner_engine.generate_plan(user_text, tools_desc)
+            if plan:
+                logger.info(f"Planner generated {len(plan.tasks)} tasks.")
+                plan_context = "DECOMPOSED EXECUTION PLAN:\n"
+                for tid, task in plan.tasks.items():
+                    plan_context += f"- {tid}: {task.description} (using {task.tool or 'reasoning'})\n"
+                plan_context += "\nFollow this plan step-by-step."
 
         # Build agent once, reuse across calls
         if self._agent is None:
-            # Bind tools to an LLM copy — separate from conversational LLM
             llm_with_tools = ChatOllama(
                 model=self.llm.model,
                 base_url=self.llm.base_url,
-                temperature=0.2,   # Lower temp for tool use — be decisive
+                temperature=0.1,   # Maximum precision for agent
                 num_ctx=8192,
             )
             self._agent = create_react_agent(llm_with_tools, self._tools)
             logger.info(f"ReAct agent built with {len(self._tools)} tools.")
 
-        system_content = self._get_system_prompt(user_text)
+        system_content = self._get_system_prompt(user_text, extra_context=plan_context)
 
-        # Build messages for the agent — include recent history for context
+        # Build messages for the agent
         history = self._build_message_history()
         input_messages = (
             [SystemMessage(content=system_content)]
@@ -372,17 +380,9 @@ class LavenderBrain:
             + [HumanMessage(content=user_text)]
         )
 
-        # Step 2: Safety Pre-validation
-        # We can scan user_text for early safety violations here.
-        # Inside LangGraph, tools are validated at call-time.
-
+        # ── STEP 2: EXECUTION ──
         try:
-            # We wrap the tool call execution in our safety layer
-            # For this we need to pass a custom tool executor to LangGraph
-            # For now, we enhance the invocation
             result = self._agent.invoke({"messages": input_messages})
-
-            # Extract the last AIMessage from the agent's output
             messages_out = result.get("messages", [])
             for msg in reversed(messages_out):
                 if hasattr(msg, "content") and msg.content:
@@ -395,6 +395,22 @@ class LavenderBrain:
         except Exception as e:
             logger.error(f"Agent execution failed: {e}. Falling back to LLM.")
             return self._call_llm(user_text)
+
+    # ── REFLEX LAYER ──
+
+    def _reflex_match(self, text: str) -> Optional[str]:
+        """Fast-path for common deterministic commands."""
+        t = text.lower().strip()
+
+        # Time
+        if t in ("what time is it", "time", "current time"):
+            return f"It's {time.strftime('%H:%M')}."
+
+        # Greeting reflex
+        if t in ("hello", "hi", "hey"):
+            return self.current_personality.special_responses.get("greeting", "Hello.")
+
+        return None
 
     # ── MAIN THINK ENTRY POINT ────────────────────────────────────────────────
 
@@ -415,6 +431,13 @@ class LavenderBrain:
             return ""
 
         logger.info(f"[{self.current_personality.display_name}] Thinking: '{text}'")
+
+        # ── STEP 0: REFLEX ──
+        reflex_response = self._reflex_match(text)
+        if reflex_response:
+            logger.info("Reflex match found. Skipping LLM.")
+            self._store_turn(text, reflex_response)
+            return reflex_response
 
         # ── STEP 1: ROUTE ─────────────────────────────────────────────────────
         intent_result = self.route(text)
