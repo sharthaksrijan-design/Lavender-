@@ -220,6 +220,7 @@ class Lavender:
                     wake_words=CONFIG["system"]["wake_words"],
                     silence_threshold=CONFIG["system"]["silence_threshold_seconds"],
                     input_device=CONFIG["audio"].get("input_device"),
+                    language=CONFIG["audio"].get("whisper_language", "en"),
                 )
             except Exception as e:
                 logger.error(f"Voice perception init failed: {e}")
@@ -275,13 +276,18 @@ class Lavender:
         try:
             from tools.calendar import _load_events
             from datetime import datetime
-            for event in _load_events():
+            events = _load_events()
+            logger.info(f"Loading {len(events)} calendar events for proactive triggers.")
+            for event in events:
                 try:
+                    # Parse ISO string back to datetime
                     t = datetime.fromisoformat(event["start"])
+                    # Only register for today
                     if t.date() == datetime.now().date():
                         self.proactive.add_calendar_trigger(event["title"], t)
-                except Exception:
-                    pass
+                        logger.info(f"Registered proactive warning for: {event['title']} at {t.strftime('%H:%M')}")
+                except Exception as e:
+                    logger.debug(f"Skipping event {event.get('title')}: {e}")
         except Exception as e:
             logger.warning(f"Could not load calendar triggers: {e}")
 
@@ -328,6 +334,17 @@ class Lavender:
             self.hologram.on_thinking()
 
         self.proactive.note_interaction()
+
+        # ── ASYNC TASK ROUTING ──
+        # Check if the intent should be handled asynchronously
+        intent_result = self.brain.route(text)
+        if intent_result.get("intent") == "operational_async":
+            logger.info(f"Routing request to autonomous task worker: {text}")
+            self._task_queue.put(text)
+            resp = "I've started that task in the background. I'll let you know when it's done."
+            print_lavender(self.brain.personality_name, resp)
+            self.voice_out.speak(resp)
+            return
 
         full_response = ""
         # Use sentence streaming to reduce perceived latency
@@ -579,12 +596,23 @@ class Lavender:
         threading.Thread(target=self._task_worker, name="task-worker", daemon=True).start()
 
     def _task_worker(self):
-        """Processes background tasks autonomously."""
+        """Processes background tasks autonomously using the brain."""
         while self._running:
             try:
-                task_data = self._task_queue.get(timeout=1.0)
-                logger.info(f"Executing background task: {task_data}")
-                # Execute task logic...
+                task_request = self._task_queue.get(timeout=1.0)
+                logger.info(f"Executing background task: {task_request}")
+
+                # Use the brain to handle the background request
+                # We use a special 'autonomous' flag if we want different behavior
+                result = self.brain.think(task_request)
+
+                # Reporting back
+                logger.info(f"Background task result: {result[:100]}...")
+
+                # If the user is idle, we might want to proactively speak the result
+                if state_engine.state.user == UserState.IDLE:
+                    self._on_proactive_trigger(f"Finished that task: {result}", TriggerPriority.LOW)
+
                 self._task_queue.task_done()
             except queue.Empty:
                 continue
