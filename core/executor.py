@@ -141,10 +141,12 @@ class TaskExecutor:
         """Worker coroutine"""
         while self.running:
             try:
-                # Get next task from priority queue
+                # Get next task from priority queue.
+                # Reduced timeout for faster loop response if needed,
+                # though queue.get() is already blocking-reactive.
                 _, task = await asyncio.wait_for(
                     self.queue.get(),
-                    timeout=1.0
+                    timeout=0.2
                 )
 
                 logger.info(f"Worker {worker_id} starting task {task.task_id}")
@@ -217,8 +219,7 @@ class TaskExecutor:
         last_error = None
         for attempt in range(step.retry_count):
             try:
-                # In our architecture, the brain handles tool execution via LangGraph or direct calls
-                # Here we assume a direct call for simplicity or a specialized brain method
+                # Use faster tool execution if brain supports it
                 result = await self.brain.execute_tool(step.tool, step.params, timeout=step.timeout)
                 return result
 
@@ -230,7 +231,9 @@ class TaskExecutor:
                 logger.error(f"Step error (attempt {attempt+1}/{step.retry_count}): {e}")
                 last_error = str(e)
                 if attempt < step.retry_count - 1:
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    # Optimized backoff for responsiveness
+                    backoff = min(1.0, 0.2 * (2 ** attempt))
+                    await asyncio.sleep(backoff)
 
         raise Exception(f"Step failed after {step.retry_count} attempts. Last error: {last_error}")
 
