@@ -15,7 +15,8 @@ import random
 import time
 import logging
 import threading
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Any
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
@@ -32,10 +33,12 @@ from core.personality import (
 from core.memory import LavenderMemory
 from core.summarizer import SessionSummarizer
 from core.state import instance as state_engine
-from core.planner import instance as planner_engine
+from core.planner import instance as planner_engine, Planner
 from core.task_state import instance as task_engine, TaskStatus, Step
 from core.safety import instance as safety_layer
-from tools.tool_registry import describe_toolkit
+from core.self_coder import SafeCodeGenerator, CapabilityExpansion
+from core.agent_factory import AgentFactory
+from tools.tool_registry import describe_toolkit, build_toolkit
 
 logger = logging.getLogger("lavender.brain")
 
@@ -122,6 +125,7 @@ class LavenderBrain:
         intent_threshold: float = 0.75,
         personality_overrides: dict = None,
     ):
+        self.planner_engine = Planner(model=primary_model, ollama_base_url=ollama_base_url)
         self.current_personality: PersonalityConfig = get_personality(personality)
         self.max_working_memory = max_working_memory
 
@@ -146,6 +150,12 @@ class LavenderBrain:
 
         # Tools (optional — Milestone 4)
         self._tools: list = tools or []
+        self._ollama_base_url = ollama_base_url
+
+        # v2.0 Extensions
+        self.code_gen = SafeCodeGenerator(self, Path(__file__).parent.parent / "tools")
+        self.capability = CapabilityExpansion(self, self.code_gen)
+        self.agent_factory = AgentFactory(self)
 
         logger.info(f"Initializing LLM clients (Ollama at {ollama_base_url})...")
 
@@ -173,6 +183,12 @@ class LavenderBrain:
         )
 
     # ── INTENT ROUTING ───────────────────────────────────────────────────────
+
+    def get_tool(self, name: str) -> Any:
+        for t in self._tools:
+            if getattr(t, "name", "") == name:
+                return t
+        return None
 
     def route(self, text: str) -> dict:
         """
@@ -428,6 +444,26 @@ class LavenderBrain:
         messages.append(HumanMessage(content=user_text))
         response = self.llm.invoke(messages)
         return response.content.strip()
+
+    async def execute_tool(self, tool_name: str, params: dict, timeout: int = 60) -> Any:
+        """Executes a tool by name with safety checks."""
+        # Find tool in registry
+        target_tool = None
+        for t in self._tools:
+            if getattr(t, "name", "") == tool_name:
+                target_tool = t
+                break
+
+        if not target_tool:
+            raise ValueError(f"Tool '{tool_name}' not found.")
+
+        # Execute
+        import asyncio
+        if hasattr(target_tool, "ainvoke"):
+            return await asyncio.wait_for(target_tool.ainvoke(params), timeout=timeout)
+        else:
+            # Fallback for sync tools
+            return target_tool.invoke(params)
 
     def _call_agent(self, user_text: str) -> str:
         """
@@ -735,6 +771,18 @@ class LavenderBrain:
             f"Facts: {len(result['facts'])} | "
             f"Tags: {result['tags']}"
         )
+
+    def reload_tools(self):
+        """Reloads tools from registry - used after self-coding new tools."""
+        # This requires re-importing build_toolkit with same args
+        # In a real system, we'd store the toolkit config.
+        # For now, we manually reload from common defaults.
+        self._tools = build_toolkit(
+            ha_url=os.getenv("HA_URL"),
+            ha_token=os.getenv("HA_TOKEN")
+        )
+        self._agent = None # Force rebuild
+        logger.info("Tools reloaded.")
 
     def clear_session(self):
         """Clears working memory. Personality is preserved. Memory is NOT cleared."""

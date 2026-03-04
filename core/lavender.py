@@ -29,6 +29,7 @@ import signal
 import logging
 import threading
 import queue
+import uuid
 import argparse
 import time
 import yaml
@@ -53,6 +54,7 @@ from core.intent_fusion import IntentFusion, FusedIntent, Modality, SurfaceContr
 from tools.tool_registry import build_toolkit, describe_toolkit
 from core.proactive import ProactiveEngine, TriggerPriority
 from core.state import instance as state_engine, UserState, SystemStatus
+from core.executor import TaskExecutor, AutonomousTask, TaskStep, TaskPriority, TaskStatus
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 CONFIG_PATH = ROOT / "config" / "lavender.yaml"
@@ -259,8 +261,9 @@ class Lavender:
         )
         self.health.start()
 
-        # TASK QUEUE
-        self._task_queue = queue.Queue()
+        # TASK EXECUTOR (Jarvis v2.0)
+        self.executor = TaskExecutor(self.brain, self.memory)
+        self.executor.start()
 
         # PROACTIVE ENGINE
         console.print("[dim]  proactive...[/dim]", end="\r")
@@ -290,9 +293,6 @@ class Lavender:
                     logger.debug(f"Skipping event {event.get('title')}: {e}")
         except Exception as e:
             logger.warning(f"Could not load calendar triggers: {e}")
-
-        # START TASK WORKER
-        self._start_task_worker()
 
         console.print("[dim]  all systems ready.[/dim]")
         console.print("")
@@ -335,16 +335,28 @@ class Lavender:
 
         self.proactive.note_interaction()
 
-        # ── ASYNC TASK ROUTING ──
-        # Check if the intent should be handled asynchronously
+        # ── JARVIS v2.0 AUTONOMOUS TASK ROUTING ──
         intent_result = self.brain.route(text)
         if intent_result.get("intent") == "operational_async":
-            logger.info(f"Routing request to autonomous task worker: {text}")
-            self._task_queue.put(text)
-            resp = "I've started that task in the background. I'll let you know when it's done."
-            print_lavender(self.brain.personality_name, resp)
-            self.voice_out.speak(resp)
-            return
+            logger.info(f"Routing request to Autonomous Task Executor: {text}")
+
+            # Use Brain to create a Task Object
+            plan = self.brain.planner_engine.generate_plan(text, describe_toolkit(self.toolkit))
+            if plan:
+                task = AutonomousTask(
+                    task_id=str(uuid.uuid4())[:8],
+                    description=text,
+                    steps=[TaskStep(action=t.description, tool=t.tool, params=t.args) for t in plan.tasks.values()],
+                    status=TaskStatus.QUEUED,
+                    priority=TaskPriority.NORMAL,
+                    created_at=datetime.now()
+                )
+                asyncio.run(self.executor.submit(task))
+
+                resp = f"Autonomous execution started. Task ID: {task.task_id}. I'll notify you upon completion."
+                print_lavender(self.brain.personality_name, resp)
+                self.voice_out.speak(resp)
+                return
 
         full_response = ""
         # Use sentence streaming to reduce perceived latency
@@ -598,34 +610,6 @@ class Lavender:
                 title=f"{component} recovered", message="Back online.", severity="info"
             )
 
-    # ── TASK WORKER ──
-
-    def _start_task_worker(self):
-        threading.Thread(target=self._task_worker, name="task-worker", daemon=True).start()
-
-    def _task_worker(self):
-        """Processes background tasks autonomously using the brain."""
-        while self._running:
-            try:
-                task_request = self._task_queue.get(timeout=1.0)
-                logger.info(f"Executing background task: {task_request}")
-
-                # Use the brain to handle the background request
-                # We use a special 'autonomous' flag if we want different behavior
-                result = self.brain.think(task_request)
-
-                # Reporting back
-                logger.info(f"Background task result: {result[:100]}...")
-
-                # If the user is idle, we might want to proactively speak the result
-                if state_engine.state.user == UserState.IDLE:
-                    self._on_proactive_trigger(f"Finished that task: {result}", TriggerPriority.LOW)
-
-                self._task_queue.task_done()
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.error(f"Task worker error: {e}")
 
     # ── SHUTDOWN ──────────────────────────────────────────────────────────────
 
