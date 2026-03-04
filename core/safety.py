@@ -22,6 +22,7 @@ SENSITIVE_TOOLS = {
     "social_post",      # Public reputation
     "system_command",   # OS level changes
     "make_call",        # External contact
+    "deploy_new_tool",  # Self-modification
 }
 
 class SafetyLayer:

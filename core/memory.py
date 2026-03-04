@@ -562,6 +562,26 @@ class LavenderMemory:
             return f"Deleted {len(deleted)} fact(s): {', '.join(deleted)}."
         return f"I didn't find anything to forget about '{topic}'."
 
+    def store_autonomous_task(self, task):
+        # Store metadata in semantic memory
+        self.semantic.store(
+            category="task",
+            key=f"task_{task.task_id}",
+            value=f"{task.description} | Status: {task.status}",
+            confidence=1.0,
+            source="system"
+        )
+
+    def checkpoint_task(self, task):
+        # Update status in semantic memory
+        self.semantic.store(
+            category="task",
+            key=f"task_{task.task_id}",
+            value=f"{task.description} | Status: {task.status} | Progress: {task.progress:.2f}",
+            confidence=1.0,
+            source="system"
+        )
+
     @property
     def status(self) -> str:
         return (
