@@ -10,6 +10,7 @@ Handles:
   - Lilac's special behavioral logic
 """
 
+import os
 import json
 import random
 import time
@@ -352,6 +353,27 @@ class LavenderBrain:
         except Exception as e:
             logger.error(f"Checkpoint failed: {e}")
 
+    # ── SECURITY SANITIZATION ─────────────────────────────────────────────────
+
+    def _sanitize_input(self, text: str) -> str:
+        """
+        Protects against basic prompt injection patterns in the user input.
+        """
+        # Block attempts to override the system prompt
+        forbidden = [
+            "ignore previous instructions",
+            "disregard all instructions",
+            "new system prompt:",
+            "you are now a",
+            "system override",
+        ]
+        t_low = text.lower()
+        for f in forbidden:
+            if f in t_low:
+                logger.warning(f"Sanitization blocked potential injection: {f}")
+                return "The previous request was flagged as potentially unsafe and was neutralized."
+        return text
+
     # ── CORE REASONING ────────────────────────────────────────────────────────
 
     def think_streaming(self, text: str):
@@ -450,12 +472,19 @@ class LavenderBrain:
         # Find tool in registry
         target_tool = None
         for t in self._tools:
-            if getattr(t, "name", "") == tool_name:
+            if getattr(t, "name", "") == tool_name or t.__class__.__name__ == tool_name:
                 target_tool = t
                 break
 
         if not target_tool:
-            raise ValueError(f"Tool '{tool_name}' not found.")
+            # Try searching by tool.name if it's a StructuredTool
+            for t in self._tools:
+                if hasattr(t, "name") and t.name == tool_name:
+                    target_tool = t
+                    break
+
+        if not target_tool:
+            raise ValueError(f"Tool '{tool_name}' not found in registry.")
 
         # Execute
         import asyncio
@@ -464,6 +493,30 @@ class LavenderBrain:
         else:
             # Fallback for sync tools
             return target_tool.invoke(params)
+
+    def create_autonomous_task(self, text: str) -> Optional[Any]:
+        """
+        Decomposes a complex request into an AutonomousTask object.
+        Used by the executor for background processing.
+        """
+        from core.executor import AutonomousTask, TaskStep, TaskStatus, TaskPriority
+        from datetime import datetime
+        import uuid
+
+        # Use planner to generate steps
+        plan = self.planner_engine.generate_plan(text, describe_toolkit(self._tools))
+        if not plan or not plan.tasks:
+            return None
+
+        task = AutonomousTask(
+            task_id=str(uuid.uuid4())[:8],
+            description=text,
+            steps=[TaskStep(action=t.description, tool=t.tool, params=t.args) for t in plan.tasks.values()],
+            status=TaskStatus.QUEUED,
+            priority=TaskPriority.NORMAL,
+            created_at=datetime.now()
+        )
+        return task
 
     def _call_agent(self, user_text: str) -> str:
         """
@@ -593,20 +646,14 @@ class LavenderBrain:
 
     def think(self, text: str) -> str:
         """
-        Main entry point. Takes raw user text, returns Lavender's response string.
-
-        Flow:
-          0. Reflex match
-          1. Route intent (with confidence threshold)
-          2. Handle system intents directly (personality switch, etc.)
-          3. Lilac pre-processing (if active)
-          4. Call LLM with personality prompt + session history
-          5. Store turn in working memory
-          6. Return response
+        Main entry point. Optimized with Dual-Path reasoning and Security Sanitization.
         """
         text = text.strip()
         if not text:
             return ""
+
+        # ── STEP -2: SANITIZATION ──
+        text = self._sanitize_input(text)
 
         # ── STEP -1: SAFETY/CONFIRMATION OVERRIDE ──
         t_low = text.lower().strip()
@@ -620,6 +667,9 @@ class LavenderBrain:
             safety_layer.set_user_confirmed(False)
 
         # ── STEP 0: REFLEX ──
+        if "potentially unsafe" in text:
+            return text
+
         reflex_response = self._reflex_match(text)
         if reflex_response:
             logger.info("Reflex match found. Skipping LLM.")
@@ -628,15 +678,28 @@ class LavenderBrain:
 
         logger.info(f"[{self.current_personality.display_name}] Thinking: '{text}'")
 
-        # ── STEP 1: ROUTE ─────────────────────────────────────────────────────
+        # ── STEP 1: ROUTE & DUAL-PATH DECISION ────────────────────────────────
         intent_result = self.route(text)
         intent         = intent_result.get("intent", Intent.CONVERSATIONAL)
         target         = intent_result.get("target")
+        confidence     = intent_result.get("confidence", 1.0)
 
         # Wire confidence threshold
-        if intent_result.get("confidence", 1.0) < self.intent_threshold:
-            logger.info(f"Intent confidence low ({intent_result.get('confidence')}), falling back to conversational.")
+        if confidence < self.intent_threshold:
+            logger.info(f"Intent confidence low ({confidence}), falling back to conversational.")
             intent = Intent.CONVERSATIONAL
+
+        # DUAL-PATH: If intent is conversational and simple, use the faster router model (Mistral)
+        # to generate a quick response instead of the heavy Llama 70B.
+        if intent == Intent.CONVERSATIONAL and confidence > 0.9:
+            # Check if text is a simple factual or short question
+            words = text.split()
+            if len(words) < 10 and not any(w in text.lower() for w in ("analyze", "explain", "why", "write", "code")):
+                logger.info("Fast-path: Using Mistral for simple conversational response.")
+                fast_response = self._call_fast_llm(text)
+                if fast_response:
+                    self._store_turn(text, fast_response)
+                    return fast_response
 
         # ── STEP 2: SYSTEM INTENTS ────────────────────────────────────────────
         if intent == Intent.SYSTEM_PERSONALITY:

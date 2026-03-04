@@ -74,7 +74,8 @@ class TaskExecutor:
         self.memory = memory
         self.max_concurrent = max_concurrent
         self.tasks: Dict[str, AutonomousTask] = {}
-        self.queue = asyncio.PriorityQueue()
+        self.queue = None  # Created in the loop
+        self.loop = None
         self.running = False
         self._loop_task: Optional[asyncio.Task] = None
 
@@ -83,38 +84,48 @@ class TaskExecutor:
         if not self.running:
             self.running = True
             import threading
+            from concurrent.futures import Future
+
+            ready_event = threading.Event()
+
             def run_loop():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                self._loop_task = loop.create_task(self.execute_loop())
-                loop.run_forever()
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
+                self.queue = asyncio.PriorityQueue()
+                self._loop_task = self.loop.create_task(self.execute_loop())
+                ready_event.set()
+                self.loop.run_forever()
 
             self._worker_thread = threading.Thread(target=run_loop, daemon=True)
             self._worker_thread.start()
+            ready_event.wait()
             logger.info("Task Executor started in background thread.")
 
-    async def stop(self):
+    def stop(self):
         """Stop the execution loop"""
         self.running = False
-        if self._loop_task:
-            self._loop_task.cancel()
-            try:
-                await self._loop_task
-            except asyncio.CancelledError:
-                pass
+        if self.loop:
+            self.loop.call_soon_threadsafe(self.loop.stop)
         logger.info("Task Executor stopped.")
 
-    async def submit(self, task: AutonomousTask) -> str:
-        """Submit task for execution"""
+    def submit(self, task: AutonomousTask) -> str:
+        """Submit task for execution (Thread-safe)"""
         self.tasks[task.task_id] = task
-        # PriorityQueue stores (priority_value, item)
-        await self.queue.put((task.priority.value, task))
 
-        # Store in memory for recovery (assuming LavenderMemory has this method)
+        # Store in memory for recovery
         if hasattr(self.memory, 'store_autonomous_task'):
             self.memory.store_autonomous_task(task)
 
-        logger.info(f"Task {task.task_id} submitted: {task.description}")
+        # Push to queue via thread-safe call
+        if self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self.queue.put((task.priority.value, task)),
+                self.loop
+            )
+            logger.info(f"Task {task.task_id} submitted: {task.description}")
+        else:
+            logger.error("Executor loop not running, task rejected.")
+
         return task.task_id
 
     async def execute_loop(self):
@@ -130,10 +141,12 @@ class TaskExecutor:
         """Worker coroutine"""
         while self.running:
             try:
-                # Get next task from priority queue
+                # Get next task from priority queue.
+                # Reduced timeout for faster loop response if needed,
+                # though queue.get() is already blocking-reactive.
                 _, task = await asyncio.wait_for(
                     self.queue.get(),
-                    timeout=1.0
+                    timeout=0.2
                 )
 
                 logger.info(f"Worker {worker_id} starting task {task.task_id}")
@@ -206,8 +219,7 @@ class TaskExecutor:
         last_error = None
         for attempt in range(step.retry_count):
             try:
-                # In our architecture, the brain handles tool execution via LangGraph or direct calls
-                # Here we assume a direct call for simplicity or a specialized brain method
+                # Use faster tool execution if brain supports it
                 result = await self.brain.execute_tool(step.tool, step.params, timeout=step.timeout)
                 return result
 
@@ -219,7 +231,9 @@ class TaskExecutor:
                 logger.error(f"Step error (attempt {attempt+1}/{step.retry_count}): {e}")
                 last_error = str(e)
                 if attempt < step.retry_count - 1:
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    # Optimized backoff for responsiveness
+                    backoff = min(1.0, 0.2 * (2 ** attempt))
+                    await asyncio.sleep(backoff)
 
         raise Exception(f"Step failed after {step.retry_count} attempts. Last error: {last_error}")
 

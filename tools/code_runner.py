@@ -141,6 +141,16 @@ class CodeRunner:
                     if any(c in mode for c in ("w", "a", "x")):
                         return "File writing is not allowed in sandboxed execution."
 
+            # BLOCK DYNAMIC ATTRIBUTE ACCESS (getattr, setattr, delattr)
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in ("getattr", "setattr", "delattr", "hasattr"):
+                    return f"Dynamic attribute access '{node.func.id}' is blocked for security."
+
+            # BLOCK ACCESS TO __ CLASSES (Dunder bypass)
+            if isinstance(node, ast.Attribute):
+                if node.attr.startswith("__"):
+                    return "Access to dunder attributes is blocked."
+
         return None
 
     # ── RUNNER ────────────────────────────────────────────────────────────────

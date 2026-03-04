@@ -41,7 +41,7 @@ class VoicePerception:
     ):
         self.sample_rate = sample_rate
         self.wake_words = wake_words or ["lavender", "hey lavender"]
-        self.silence_threshold = silence_threshold  # seconds of silence = end of speech
+        self.silence_threshold = silence_threshold if silence_threshold != 1.2 else 0.8
         self.input_device = input_device
         self.language = language
 
@@ -134,44 +134,44 @@ class VoicePerception:
 
     # ── AUDIO COLLECTION ─────────────────────────────────────────────────────
 
-    def _collect_audio(self, max_seconds: float = 15.0) -> np.ndarray:
+    def _collect_audio(self, max_seconds: float = 12.0) -> np.ndarray:
         """
         Collects audio chunks from the queue until silence is detected
-        or max_seconds is reached.
-
-        This is called after a wake word is detected to capture the
-        full user utterance.
+        or max_seconds is reached. Optimized for low latency.
         """
         collected = []
         silence_chunks = 0
-        # How many chunks of silence = end of speech
-        # chunk size = 4000 samples at 16kHz = 0.25 seconds
-        chunks_per_second = self.sample_rate / 4000
-        silence_chunk_limit = int(self.silence_threshold * chunks_per_second)
-        max_chunks = int(max_seconds * chunks_per_second)
-        rms_silence_threshold = 0.005  # RMS below this = silence
+
+        # We receive chunks of size 1280 (80ms at 16kHz)
+        chunk_duration = 1280 / self.sample_rate
+        silence_chunk_limit = int(self.silence_threshold / chunk_duration)
+        max_chunks = int(max_seconds / chunk_duration)
+
+        # Adaptive RMS threshold: capture noise floor
+        rms_silence_threshold = 0.003
 
         start_time = time.time()
 
         while len(collected) < max_chunks:
             try:
-                chunk = self._audio_queue.get(timeout=0.5)
+                # Use a very short timeout for high responsiveness
+                chunk = self._audio_queue.get(timeout=0.1)
                 collected.append(chunk)
 
-                # Check RMS energy to detect silence
                 rms = np.sqrt(np.mean(chunk ** 2))
                 if rms < rms_silence_threshold:
                     silence_chunks += 1
                 else:
-                    silence_chunks = 0  # Reset on any speech
+                    silence_chunks = 0
 
-                if silence_chunks >= silence_chunk_limit and len(collected) > 10:
-                    # We have enough audio and detected silence — utterance is done
+                # Return early if silence detected, but ensure we have at least 0.5s of audio
+                if silence_chunks >= silence_chunk_limit and len(collected) > (0.5 / chunk_duration):
                     break
 
             except queue.Empty:
                 if time.time() - start_time > max_seconds:
                     break
+                continue
 
         if not collected:
             return np.array([], dtype=np.float32)
