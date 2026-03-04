@@ -74,7 +74,8 @@ class TaskExecutor:
         self.memory = memory
         self.max_concurrent = max_concurrent
         self.tasks: Dict[str, AutonomousTask] = {}
-        self.queue = asyncio.PriorityQueue()
+        self.queue = None  # Created in the loop
+        self.loop = None
         self.running = False
         self._loop_task: Optional[asyncio.Task] = None
 
@@ -83,38 +84,48 @@ class TaskExecutor:
         if not self.running:
             self.running = True
             import threading
+            from concurrent.futures import Future
+
+            ready_event = threading.Event()
+
             def run_loop():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                self._loop_task = loop.create_task(self.execute_loop())
-                loop.run_forever()
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
+                self.queue = asyncio.PriorityQueue()
+                self._loop_task = self.loop.create_task(self.execute_loop())
+                ready_event.set()
+                self.loop.run_forever()
 
             self._worker_thread = threading.Thread(target=run_loop, daemon=True)
             self._worker_thread.start()
+            ready_event.wait()
             logger.info("Task Executor started in background thread.")
 
-    async def stop(self):
+    def stop(self):
         """Stop the execution loop"""
         self.running = False
-        if self._loop_task:
-            self._loop_task.cancel()
-            try:
-                await self._loop_task
-            except asyncio.CancelledError:
-                pass
+        if self.loop:
+            self.loop.call_soon_threadsafe(self.loop.stop)
         logger.info("Task Executor stopped.")
 
-    async def submit(self, task: AutonomousTask) -> str:
-        """Submit task for execution"""
+    def submit(self, task: AutonomousTask) -> str:
+        """Submit task for execution (Thread-safe)"""
         self.tasks[task.task_id] = task
-        # PriorityQueue stores (priority_value, item)
-        await self.queue.put((task.priority.value, task))
 
-        # Store in memory for recovery (assuming LavenderMemory has this method)
+        # Store in memory for recovery
         if hasattr(self.memory, 'store_autonomous_task'):
             self.memory.store_autonomous_task(task)
 
-        logger.info(f"Task {task.task_id} submitted: {task.description}")
+        # Push to queue via thread-safe call
+        if self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self.queue.put((task.priority.value, task)),
+                self.loop
+            )
+            logger.info(f"Task {task.task_id} submitted: {task.description}")
+        else:
+            logger.error("Executor loop not running, task rejected.")
+
         return task.task_id
 
     async def execute_loop(self):

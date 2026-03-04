@@ -33,6 +33,8 @@ import uuid
 import argparse
 import time
 import yaml
+import asyncio
+from datetime import datetime
 from typing import Optional
 from pathlib import Path
 from dotenv import load_dotenv
@@ -341,17 +343,9 @@ class Lavender:
             logger.info(f"Routing request to Autonomous Task Executor: {text}")
 
             # Use Brain to create a Task Object
-            plan = self.brain.planner_engine.generate_plan(text, describe_toolkit(self.toolkit))
-            if plan:
-                task = AutonomousTask(
-                    task_id=str(uuid.uuid4())[:8],
-                    description=text,
-                    steps=[TaskStep(action=t.description, tool=t.tool, params=t.args) for t in plan.tasks.values()],
-                    status=TaskStatus.QUEUED,
-                    priority=TaskPriority.NORMAL,
-                    created_at=datetime.now()
-                )
-                asyncio.run(self.executor.submit(task))
+            task = self.brain.create_autonomous_task(text)
+            if task:
+                self.executor.submit(task)
 
                 resp = f"Autonomous execution started. Task ID: {task.task_id}. I'll notify you upon completion."
                 print_lavender(self.brain.personality_name, resp)

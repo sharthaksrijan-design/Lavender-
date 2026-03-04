@@ -10,6 +10,7 @@ Handles:
   - Lilac's special behavioral logic
 """
 
+import os
 import json
 import random
 import time
@@ -450,12 +451,19 @@ class LavenderBrain:
         # Find tool in registry
         target_tool = None
         for t in self._tools:
-            if getattr(t, "name", "") == tool_name:
+            if getattr(t, "name", "") == tool_name or t.__class__.__name__ == tool_name:
                 target_tool = t
                 break
 
         if not target_tool:
-            raise ValueError(f"Tool '{tool_name}' not found.")
+            # Try searching by tool.name if it's a StructuredTool
+            for t in self._tools:
+                if hasattr(t, "name") and t.name == tool_name:
+                    target_tool = t
+                    break
+
+        if not target_tool:
+            raise ValueError(f"Tool '{tool_name}' not found in registry.")
 
         # Execute
         import asyncio
@@ -464,6 +472,30 @@ class LavenderBrain:
         else:
             # Fallback for sync tools
             return target_tool.invoke(params)
+
+    def create_autonomous_task(self, text: str) -> Optional[Any]:
+        """
+        Decomposes a complex request into an AutonomousTask object.
+        Used by the executor for background processing.
+        """
+        from core.executor import AutonomousTask, TaskStep, TaskStatus, TaskPriority
+        from datetime import datetime
+        import uuid
+
+        # Use planner to generate steps
+        plan = self.planner_engine.generate_plan(text, describe_toolkit(self._tools))
+        if not plan or not plan.tasks:
+            return None
+
+        task = AutonomousTask(
+            task_id=str(uuid.uuid4())[:8],
+            description=text,
+            steps=[TaskStep(action=t.description, tool=t.tool, params=t.args) for t in plan.tasks.values()],
+            status=TaskStatus.QUEUED,
+            priority=TaskPriority.NORMAL,
+            created_at=datetime.now()
+        )
+        return task
 
     def _call_agent(self, user_text: str) -> str:
         """
