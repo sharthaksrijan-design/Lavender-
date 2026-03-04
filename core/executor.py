@@ -69,10 +69,11 @@ class TaskExecutor:
     Handles background tasks, checkpointing, recovery.
     """
 
-    def __init__(self, brain, memory, max_concurrent=3):
+    def __init__(self, brain, memory, max_concurrent=3, max_total=50):
         self.brain = brain
         self.memory = memory
         self.max_concurrent = max_concurrent
+        self.max_total = max_total
         self.tasks: Dict[str, AutonomousTask] = {}
         self.queue = None  # Created in the loop
         self.loop = None
@@ -110,6 +111,10 @@ class TaskExecutor:
 
     def submit(self, task: AutonomousTask) -> str:
         """Submit task for execution (Thread-safe)"""
+        if len(self.tasks) >= self.max_total:
+            logger.warning("Max total tasks reached. Submission rejected.")
+            raise Exception("System capacity reached (max_total_tasks).")
+
         self.tasks[task.task_id] = task
 
         # Store in memory for recovery

@@ -24,6 +24,7 @@ import textwrap
 import subprocess
 import tempfile
 import logging
+import resource
 from dataclasses import dataclass
 from typing import Optional
 
@@ -35,7 +36,7 @@ BLOCKED_IMPORTS = {
     "os", "subprocess", "sys", "socket", "urllib",
     "requests", "httpx", "aiohttp",
     "shutil", "glob", "pathlib",
-    "ctypes", "multiprocessing",
+    "ctypes", "multiprocessing", "resource",
     "threading",  # Allow within reason — but block direct thread creation
     "__builtins__",
 }
@@ -155,6 +156,19 @@ class CodeRunner:
 
     # ── RUNNER ────────────────────────────────────────────────────────────────
 
+    def _set_limits(self):
+        """Sets resource limits for the subprocess."""
+        # CPU time: hard timeout + 2 seconds grace
+        cpu_limit = int(self.timeout_seconds + 2)
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
+
+        # Address space (Memory): 512MB
+        mem_limit = 512 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (mem_limit, mem_limit))
+
+        # Prevent core dumps
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
     def run(self, code: str, context: dict = None) -> RunResult:
         """
         Execute code and return structured result.
@@ -193,6 +207,7 @@ class CodeRunner:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
+                preexec_fn=self._set_limits,
                 env={
                     **os.environ,
                     "PYTHONDONTWRITEBYTECODE": "1",

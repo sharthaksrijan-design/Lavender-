@@ -131,6 +131,30 @@ Generate the code:
         finally:
             os.unlink(tmp_path)
 
+    def _backup_source(self, filepath: Path):
+        """Creates a backup of the file before modification."""
+        if not filepath.exists():
+            return
+        backup_path = filepath.with_suffix(f".bak.{int(datetime.now().timestamp())}")
+        backup_path.write_text(filepath.read_text())
+        logger.info(f"Backup created: {backup_path}")
+
+    def rollback(self, tool_name: str):
+        """Rolls back a tool to its last backup."""
+        tool_file = self.tools_dir / f"{tool_name}.py"
+        backups = sorted(self.tools_dir.glob(f"{tool_name}.py.bak.*"), reverse=True)
+        if not backups:
+            logger.warning(f"No backups found for {tool_name}")
+            return False
+
+        latest_backup = backups[0]
+        tool_file.write_text(latest_backup.read_text())
+        logger.info(f"Rolled back {tool_name} from {latest_backup}")
+
+        if hasattr(self.brain, "reload_tools"):
+            self.brain.reload_tools()
+        return True
+
     def _deploy_tool(self, code: str) -> Path:
         # Extract function name for filename
         tree = ast.parse(code)
@@ -141,6 +165,10 @@ Generate the code:
                 break
 
         tool_file = self.tools_dir / f"{tool_name}.py"
+
+        # Backup before overwriting
+        self._backup_source(tool_file)
+
         tool_file.write_text(code)
         return tool_file
 

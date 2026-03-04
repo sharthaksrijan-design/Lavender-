@@ -1,0 +1,2 @@
+{"timestamp": 1772623739.2751353, "action": "test_action", "actor": "test_user", "details": {"key": "value"}, "outcome": "success"}
+{"timestamp": 1772624085.8842292, "action": "test_action", "actor": "test_user", "details": {"key": "value"}, "outcome": "success"}
