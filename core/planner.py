@@ -24,6 +24,7 @@ class Task:
     status: str = "pending"  # pending, in_progress, completed, failed
     result: Optional[str] = None
     dependencies: List[str] = field(default_factory=list)
+    sub_plan: Optional[Any] = None # For hierarchical planning
 
 class GoalPlan:
     def __init__(self, goal: str):
@@ -67,6 +68,40 @@ class Planner:
         self._base_url = ollama_base_url
         self._llm = None
 
+    def sanitize_goal(self, goal: str) -> str:
+        """Strips LLM control tokens and injection keywords from goal."""
+        forbidden = ["ignore previous", "system override", "disregard all", "you are now a"]
+        clean_goal = goal
+        for word in forbidden:
+            if word in clean_goal.lower():
+                logger.warning(f"Sanitizer blocked injection pattern in goal: {word}")
+                clean_goal = clean_goal.lower().replace(word, "[REDACTED]")
+        return clean_goal
+
+    def _check_circular(self, tasks: List[Task]) -> bool:
+        """Detects circular dependencies in task list."""
+        graph = {t.id: t.dependencies for t in tasks}
+
+        def has_cycle(v, visited, stack):
+            visited[v] = True
+            stack[v] = True
+            for neighbor in graph.get(v, []):
+                if not visited.get(neighbor, False):
+                    if has_cycle(neighbor, visited, stack):
+                        return True
+                elif stack.get(neighbor, False):
+                    return True
+            stack[v] = False
+            return False
+
+        visited = {}
+        stack = {}
+        for task_id in graph:
+            if not visited.get(task_id, False):
+                if has_cycle(task_id, visited, stack):
+                    return True
+        return False
+
     @property
     def llm(self):
         if self._llm is None:
@@ -78,6 +113,7 @@ class Planner:
         return self._llm
 
     def generate_plan(self, goal: str, tools_description: str) -> Optional[GoalPlan]:
+        goal = self.sanitize_goal(goal)
         logger.info(f"Generating plan for goal: {goal}")
         prompt = PLANNER_PROMPT.format(goal=goal, tools_description=tools_description)
 
@@ -91,6 +127,7 @@ class Planner:
 
             data = json.loads(content)
             plan = GoalPlan(goal)
+            tasks_list = []
             for t_data in data.get("tasks", []):
                 task = Task(
                     id=t_data["id"],
@@ -99,6 +136,13 @@ class Planner:
                     args=t_data.get("args", {}),
                     dependencies=t_data.get("dependencies", [])
                 )
+                tasks_list.append(task)
+
+            if self._check_circular(tasks_list):
+                logger.error("Circular dependency detected in plan.")
+                return None
+
+            for task in tasks_list:
                 plan.add_task(task)
 
             logger.info(f"Plan generated with {len(plan.tasks)} tasks.")

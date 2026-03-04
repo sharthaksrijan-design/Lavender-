@@ -70,7 +70,21 @@ class StateEngine:
         self.state = WorldState()
         self._start_time = time.time()
         self._hour_start = time.time()
+        self._shared_memory_bus: Dict[str, Any] = {}
         logger.info("State engine initialized.")
+
+    def publish(self, topic: str, message: Any):
+        """Publishes a message to the shared memory bus."""
+        self._shared_memory_bus[topic] = {
+            "data": message,
+            "timestamp": time.time()
+        }
+        logger.debug(f"Memory Bus Publish: {topic}")
+
+    def subscribe(self, topic: str) -> Optional[Any]:
+        """Subscribes to a topic from the shared memory bus."""
+        entry = self._shared_memory_bus.get(topic)
+        return entry["data"] if entry else None
 
     def update_user_activity(self):
         """Called whenever user interacts with the system."""

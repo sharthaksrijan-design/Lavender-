@@ -37,6 +37,7 @@ class Step:
     error: Optional[str] = None
     started_at: float = 0.0
     finished_at: float = 0.0
+    success_rate: float = 1.0 # Tracked tool performance
 
 @dataclass
 class TaskSession:
